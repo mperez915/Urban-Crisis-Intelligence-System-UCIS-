@@ -1,0 +1,68 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+env/
+ENV/
+target/
+*.jar
+*.class
+
+# Build outputs
+build/
+dist/
+out/
+*.log
+*.o
+*.a
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Database
+*.db
+*.sqlite
+dump.rdb
+mongodb_data/
+
+# Cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.npm/
+
+# Temporary files
+*.tmp
+*.temp
+~*
+#*#
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Security
+*.pem
+*.key
+*.crt
+secrets/

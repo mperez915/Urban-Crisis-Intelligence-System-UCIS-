@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UCIS Event Schema",
+  "type": "object",
+  "required": ["id", "timestamp", "domain", "type", "severity"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique event identifier (UUID)",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO-8601 timestamp with UTC timezone",
+      "format": "date-time"
+    },
+    "domain": {
+      "type": "string",
+      "enum": ["climate", "traffic", "health", "environment", "population"],
+      "description": "Event domain/category"
+    },
+    "type": {
+      "type": "string",
+      "description": "Specific event type within domain"
+    },
+    "zone": {
+      "type": "string",
+      "description": "Geographic zone or location identifier"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"],
+      "description": "Event severity level"
+    },
+    "processed": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether event has been processed by CEP"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata",
+      "properties": {
+        "source": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "coordinates": {
+          "type": "object",
+          "properties": {
+            "latitude": { "type": "number" },
+            "longitude": { "type": "number" }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "climate_temperature": {
+      "type": "object",
+      "properties": {
+        "temperature_celsius": { "type": "number", "minimum": -273.15 },
+        "feels_like_celsius": { "type": "number" },
+        "humidity_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      },
+      "required": ["temperature_celsius"]
+    },
+    "climate_storm": {
+      "type": "object",
+      "properties": {
+        "wind_speed_kmh": { "type": "number", "minimum": 0 },
+        "precipitation_mm": { "type": "number", "minimum": 0 },
+        "lightning_detected": { "type": "boolean" },
+        "wind_direction": { "type": "string" }
+      }
+    },
+    "traffic_congestion": {
+      "type": "object",
+      "properties": {
+        "street": { "type": "string" },
+        "vehicle_count": { "type": "integer", "minimum": 0 },
+        "average_speed_kmh": { "type": "number", "minimum": 0 },
+        "occupancy_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "traffic_accident": {
+      "type": "object",
+      "properties": {
+        "street": { "type": "string" },
+        "vehicles_involved": { "type": "integer", "minimum": 1 },
+        "injuries": { "type": "integer", "minimum": 0 },
+        "lanes_blocked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "health_emergency": {
+      "type": "object",
+      "properties": {
+        "call_type": { 
+          "type": "string",
+          "enum": ["cardiac", "trauma", "respiratory", "medical", "mental_health", "poisoning"]
+        },
+        "response_time_minutes": { "type": "number", "minimum": 0 },
+        "caller_location": { "type": "string" }
+      }
+    },
+    "environment_air_quality": {
+      "type": "object",
+      "properties": {
+        "aqi": { "type": "number", "minimum": 0 },
+        "primary_pollutant": { 
+          "type": "string",
+          "enum": ["PM2.5", "PM10", "NO2", "O3", "SO2", "CO"]
+        },
+        "temperature_celsius": { "type": "number" },
+        "humidity_percent": { "type": "number" }
+      }
+    },
+    "population_density": {
+      "type": "object",
+      "properties": {
+        "location": { "type": "string" },
+        "people_per_sqm": { "type": "number", "minimum": 0 },
+        "estimated_population": { "type": "integer", "minimum": 0 },
+        "density_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

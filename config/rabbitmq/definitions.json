@@ -1,0 +1,129 @@
+{
+  "rabbit_version": "3.12.0",
+  "rabbitmq_version": "3.12.0",
+  "definitions_version": 6,
+  "queues": [
+    {
+      "name": "ucis.cep.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "type": "classic"
+    },
+    {
+      "name": "ucis.enricher.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "type": "classic"
+    },
+    {
+      "name": "ucis.archive.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "type": "classic"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "ucis.events",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "ucis.complex",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": true,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "destination": "ucis.cep.events",
+      "destination_type": "queue",
+      "source": "ucis.events",
+      "vhost": "/",
+      "routing_key": "events.#",
+      "arguments": {}
+    },
+    {
+      "destination": "ucis.enricher.events",
+      "destination_type": "queue",
+      "source": "ucis.events",
+      "vhost": "/",
+      "routing_key": "events.#",
+      "arguments": {}
+    },
+    {
+      "destination": "ucis.archive.events",
+      "destination_type": "queue",
+      "source": "ucis.events",
+      "vhost": "/",
+      "routing_key": "events.#",
+      "arguments": {}
+    }
+  ],
+  "users": [
+    {
+      "name": "admin",
+      "password": "password_hash_here",
+      "password_hash": "2a10DJZDbk7Up2xCq53dIUUzyNHjIr21Z9wnoMAgJWt8KLy8",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    },
+    {
+      "name": "ucis_user",
+      "password": "password_hash_here",
+      "password_hash": "YF+n3V8DJELx6dZZZM8aHa2xfH3v2nxMjBDvpUEw0t3cYdQ=",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "admin",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "ucis_user",
+      "vhost": "/",
+      "configure": "^ucis\\..*",
+      "write": "^ucis\\..*",
+      "read": "^ucis\\..*"
+    }
+  ],
+  "topic_permissions": [],
+  "policies": [
+    {
+      "name": "ha-all",
+      "pattern": "^ucis\\..*",
+      "vhost": "/",
+      "definition": {
+        "ha-mode": "all",
+        "ha-sync-mode": "automatic"
+      },
+      "priority": 0,
+      "apply-to": "queues"
+    }
+  ],
+  "global_parameters": []
+}
