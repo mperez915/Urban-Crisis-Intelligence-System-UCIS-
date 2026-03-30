@@ -21,7 +21,6 @@ from datetime import datetime
 from typing import Any, Dict
 
 import pika
-from pymongo import MongoClient
 from event_generators import (
     ClimateEventGenerator,
     EnvironmentEventGenerator,
@@ -29,6 +28,7 @@ from event_generators import (
     PopulationEventGenerator,
     TrafficEventGenerator,
 )
+from pymongo import MongoClient
 
 # Configure logging
 logging.basicConfig(
@@ -47,9 +47,10 @@ class EventSimulator:
         self.rabbitmq_username = os.getenv("RABBITMQ_USERNAME", "guest")
         self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
         self.event_rate = int(os.getenv("EVENT_RATE", 100))
-        
+
         self.mongo_uri = os.getenv(
-            "MONGO_URI", "mongodb://admin:admin123@localhost:27017/ucis_db?authSource=admin"
+            "MONGO_URI",
+            "mongodb://admin:admin123@localhost:27017/ucis_db?authSource=admin",
         )
 
         self.connection = None
@@ -134,14 +135,14 @@ class EventSimulator:
         except Exception as e:
             logger.error(f"Failed to publish event: {e}")
             return False
-    
+
     def save_event(self, event: Dict[str, Any]) -> bool:
         """
         Save event to MongoDB
-        
+
         Args:
             event: Event dictionary
-            
+
         Returns:
             True if saved successfully
         """
@@ -179,7 +180,7 @@ class EventSimulator:
                 # Publish to RabbitMQ and save to MongoDB
                 published = self.publish_event(event, domain)
                 saved = self.save_event(event)
-                
+
                 if published and saved:
                     event_count += 1
 
