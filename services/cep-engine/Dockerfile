@@ -4,7 +4,6 @@ WORKDIR /app
 
 # Copy Maven files
 COPY pom.xml .
-COPY mvnw .
 
 # Download dependencies
 RUN mvn dependency:resolve
@@ -16,7 +15,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # Runtime stage
-FROM openjdk:17-slim
+FROM eclipse-temurin:17-jre
 
 WORKDIR /app
 
@@ -27,9 +26,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy JAR from builder
 COPY --from=builder /app/target/ucis-cep-*.jar app.jar
-
-# Copy config
-COPY config/ ./config/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \

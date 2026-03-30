@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY simulator.py .
 COPY event_generators/ ./event_generators/
-COPY config/ ./config/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

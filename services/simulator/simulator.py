@@ -9,7 +9,7 @@ Generates realistic IoT events from multiple domains:
 - Environment (air quality, pollution)
 - Population Density (crowds, gatherings)
 
-All events are published to RabbitMQ with proper routing keys.
+All events are published to RabbitMQ with proper routing keys AND persisted to MongoDB.
 """
 
 import json
@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 import pika
+from pymongo import MongoClient
 from event_generators import (
     ClimateEventGenerator,
     EnvironmentEventGenerator,
@@ -46,9 +47,14 @@ class EventSimulator:
         self.rabbitmq_username = os.getenv("RABBITMQ_USERNAME", "guest")
         self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
         self.event_rate = int(os.getenv("EVENT_RATE", 100))
+        
+        self.mongo_uri = os.getenv(
+            "MONGO_URI", "mongodb://admin:admin123@localhost:27017/ucis_db?authSource=admin"
+        )
 
         self.connection = None
         self.channel = None
+        self.mongo = None
 
         # Initialize event generators
         self.generators = {
@@ -90,6 +96,17 @@ class EventSimulator:
             logger.error(f"Failed to connect to RabbitMQ: {e}")
             raise
 
+    def connect_mongodb(self):
+        """Connect to MongoDB"""
+        try:
+            self.mongo = MongoClient(self.mongo_uri)
+            db = self.mongo.ucis_db
+            db.command("ping")
+            logger.info("Connected to MongoDB")
+        except Exception as e:
+            logger.error(f"Failed to connect to MongoDB: {e}")
+            raise
+
     def publish_event(self, event: Dict[str, Any], domain: str) -> bool:
         """
         Publish event to RabbitMQ
@@ -117,12 +134,34 @@ class EventSimulator:
         except Exception as e:
             logger.error(f"Failed to publish event: {e}")
             return False
+    
+    def save_event(self, event: Dict[str, Any]) -> bool:
+        """
+        Save event to MongoDB
+        
+        Args:
+            event: Event dictionary
+            
+        Returns:
+            True if saved successfully
+        """
+        try:
+            db = self.mongo.ucis_db
+            event["created_at"] = datetime.utcnow()
+            db.events.insert_one(event)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save event to MongoDB: {e}")
+            return False
 
     def run(self):
         """Main simulation loop"""
         try:
+            logger.info("Connecting to RabbitMQ...")
             self.connect_rabbitmq()
-            logger.info("Starting event generation...")
+            logger.info("Connecting to MongoDB...")
+            self.connect_mongodb()
+            logger.info("Both connections established. Starting event generation...")
 
             event_count = 0
             last_report = time.time()
@@ -137,8 +176,11 @@ class EventSimulator:
                 # Generate event
                 event = generator.generate()
 
-                # Publish event
-                if self.publish_event(event, domain):
+                # Publish to RabbitMQ and save to MongoDB
+                published = self.publish_event(event, domain)
+                saved = self.save_event(event)
+                
+                if published and saved:
                     event_count += 1
 
                     # Log progress every 1000 events
@@ -161,6 +203,9 @@ class EventSimulator:
             if self.connection:
                 self.connection.close()
                 logger.info("RabbitMQ connection closed")
+            if self.mongo:
+                self.mongo.close()
+                logger.info("MongoDB connection closed")
 
 
 if __name__ == "__main__":

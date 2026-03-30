@@ -77,16 +77,7 @@
   "users": [
     {
       "name": "admin",
-      "password": "password_hash_here",
-      "password_hash": "2a10DJZDbk7Up2xCq53dIUUzyNHjIr21Z9wnoMAgJWt8KLy8",
-      "hashing_algorithm": "rabbit_password_hashing_sha256",
-      "tags": "administrator"
-    },
-    {
-      "name": "ucis_user",
-      "password": "password_hash_here",
-      "password_hash": "YF+n3V8DJELx6dZZZM8aHa2xfH3v2nxMjBDvpUEw0t3cYdQ=",
-      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "password": "admin123",
       "tags": "administrator"
     }
   ],
@@ -102,13 +93,6 @@
       "configure": ".*",
       "write": ".*",
       "read": ".*"
-    },
-    {
-      "user": "ucis_user",
-      "vhost": "/",
-      "configure": "^ucis\\..*",
-      "write": "^ucis\\..*",
-      "read": "^ucis\\..*"
     }
   ],
   "topic_permissions": [],

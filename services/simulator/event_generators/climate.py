@@ -24,23 +24,21 @@ class ClimateEventGenerator(BaseEventGenerator):
         zone = random.choice(self.zones)
 
         if event_type == "temperature":
+            temperature = round(random.uniform(-5, 45), 2)
             event.update(
                 {
                     "zone": zone,
-                    "temperature_celsius": round(random.uniform(-5, 45), 2),
-                    "severity": self._calculate_temp_severity(
-                        event["temperature_celsius"]
-                    ),
+                    "temperature_celsius": temperature,
+                    "severity": self._calculate_temp_severity(temperature),
                 }
             )
         elif event_type == "humidity":
+            humidity = round(random.uniform(20, 100), 2)
             event.update(
                 {
                     "zone": zone,
-                    "humidity_percent": round(random.uniform(20, 100), 2),
-                    "severity": self._calculate_humidity_severity(
-                        event["humidity_percent"]
-                    ),
+                    "humidity_percent": humidity,
+                    "severity": self._calculate_humidity_severity(humidity),
                 }
             )
         elif event_type == "storm":
@@ -54,14 +52,15 @@ class ClimateEventGenerator(BaseEventGenerator):
                 }
             )
         elif event_type == "winds":
+            wind_speed = round(random.uniform(0, 80), 2)
             event.update(
                 {
                     "zone": zone,
-                    "wind_speed_kmh": round(random.uniform(0, 80), 2),
+                    "wind_speed_kmh": wind_speed,
                     "wind_direction": random.choice(
                         ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                     ),
-                    "severity": self._calculate_wind_severity(event["wind_speed_kmh"]),
+                    "severity": self._calculate_wind_severity(wind_speed),
                 }
             )
 

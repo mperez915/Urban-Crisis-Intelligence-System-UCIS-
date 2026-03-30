@@ -1,10 +1,11 @@
 package com.ucis.cep.config;
 
-import com.espertech.esper.common.client.configuration.Configuration;
 import com.espertech.esper.runtime.client.EPRuntime;
 import com.espertech.esper.runtime.client.EPRuntimeProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Esper CEP Engine Configuration
@@ -17,15 +18,19 @@ public class EsperConfig {
      */
     @Bean
     public EPRuntime epRuntime() {
-        Configuration config = new Configuration();
+        com.espertech.esper.common.client.configuration.Configuration config = 
+            new com.espertech.esper.common.client.configuration.Configuration();
         
-        // Enable timing
-        config.getRuntime().setThreadingProfile("LARGE");
+        // Event representation: Map-based events with proper type definitions
+        Map<String, Object> eventProperties = new HashMap<>();
+        eventProperties.put("id", String.class);
+        eventProperties.put("timestamp", String.class);
+        eventProperties.put("domain", String.class);
+        eventProperties.put("type", String.class);
+        eventProperties.put("zone", String.class);
+        eventProperties.put("severity", String.class);
         
-        // Event representation: Map-based events
-        config.getCommon().addEventType("Event", 
-            "{ id: String, timestamp: String, domain: String, type: String, " +
-            "zone: String, severity: String}");
+        config.getCommon().addEventType("Event", eventProperties);
         
         EPRuntime runtime = EPRuntimeProvider.getRuntime("ucis-cep", config);
         return runtime;

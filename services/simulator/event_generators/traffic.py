@@ -33,15 +33,17 @@ class TrafficEventGenerator(BaseEventGenerator):
         zone = random.choice(self.zones)
 
         if event_type == "congestion":
+            average_speed = round(random.uniform(5, 80), 2)
+            occupancy = round(random.uniform(30, 100), 2)
             event.update(
                 {
                     "street": street,
                     "zone": zone,
                     "vehicle_count": random.randint(50, 500),
-                    "average_speed_kmh": round(random.uniform(5, 80), 2),
-                    "occupancy_percent": round(random.uniform(30, 100), 2),
+                    "average_speed_kmh": average_speed,
+                    "occupancy_percent": occupancy,
                     "severity": self._calculate_congestion_severity(
-                        event["average_speed_kmh"], event["occupancy_percent"]
+                        average_speed, occupancy
                     ),
                 }
             )
