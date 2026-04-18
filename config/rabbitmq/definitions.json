@@ -19,14 +19,6 @@
       "exclusive": false,
       "type": "classic"
     },
-    {
-      "name": "ucis.archive.events",
-      "vhost": "/",
-      "durable": true,
-      "auto_delete": false,
-      "exclusive": false,
-      "type": "classic"
-    }
   ],
   "exchanges": [
     {
@@ -44,7 +36,7 @@
       "type": "topic",
       "durable": true,
       "auto_delete": false,
-      "internal": true,
+      "internal": false,
       "arguments": {}
     }
   ],
@@ -54,7 +46,7 @@
       "destination_type": "queue",
       "source": "ucis.events",
       "vhost": "/",
-      "routing_key": "events.#",
+      "routing_key": "events.enriched.#",
       "arguments": {}
     },
     {
@@ -65,14 +57,6 @@
       "routing_key": "events.#",
       "arguments": {}
     },
-    {
-      "destination": "ucis.archive.events",
-      "destination_type": "queue",
-      "source": "ucis.events",
-      "vhost": "/",
-      "routing_key": "events.#",
-      "arguments": {}
-    }
   ],
   "users": [
     {

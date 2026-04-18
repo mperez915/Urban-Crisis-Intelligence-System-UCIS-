@@ -1,0 +1,185 @@
+{
+  "zones": {
+    "downtown": {
+      "risk_level": "high",
+      "population_density": "very_high",
+      "coordinates": {
+        "latitude": 40.7128,
+        "longitude": -74.0060
+      },
+      "hospitals": [
+        {
+          "name": "Downtown Hospital",
+          "distance_km": 2.3
+        },
+        {
+          "name": "Central Medical Center",
+          "distance_km": 1.8
+        },
+        {
+          "name": "City Health Center",
+          "distance_km": 3.1
+        }
+      ],
+      "police_stations": [
+        {
+          "name": "Downtown Precinct",
+          "distance_km": 1.8
+        },
+        {
+          "name": "Central Police",
+          "distance_km": 2.5
+        }
+      ],
+      "fire_stations": [
+        {
+          "name": "Downtown Fire Station",
+          "distance_km": 2.1
+        }
+      ],
+      "avg_response_time_min": 8.5,
+      "incident_count_24h": 45,
+      "notes": "High traffic, business district, high population density"
+    },
+    "suburbs": {
+      "risk_level": "medium",
+      "population_density": "medium",
+      "coordinates": {
+        "latitude": 40.7580,
+        "longitude": -73.9855
+      },
+      "hospitals": [
+        {
+          "name": "Suburbs Medical Center",
+          "distance_km": 5.2
+        },
+        {
+          "name": "Regional Hospital",
+          "distance_km": 7.5
+        }
+      ],
+      "police_stations": [
+        {
+          "name": "Suburbs Precinct",
+          "distance_km": 4.5
+        }
+      ],
+      "fire_stations": [
+        {
+          "name": "Suburbs Fire Station",
+          "distance_km": 3.8
+        }
+      ],
+      "avg_response_time_min": 12.0,
+      "incident_count_24h": 18,
+      "notes": "Residential area, moderate traffic, family-oriented"
+    },
+    "industrial": {
+      "risk_level": "high",
+      "population_density": "low",
+      "coordinates": {
+        "latitude": 40.7489,
+        "longitude": -74.0040
+      },
+      "hospitals": [
+        {
+          "name": "Industrial Hospital",
+          "distance_km": 4.2
+        },
+        {
+          "name": "Emergency Medical",
+          "distance_km": 6.1
+        }
+      ],
+      "police_stations": [
+        {
+          "name": "Industrial Precinct",
+          "distance_km": 3.5
+        }
+      ],
+      "fire_stations": [
+        {
+          "name": "Industrial Fire Station",
+          "distance_km": 2.8
+        },
+        {
+          "name": "Hazmat Fire Unit",
+          "distance_km": 5.5
+        }
+      ],
+      "avg_response_time_min": 10.5,
+      "incident_count_24h": 32,
+      "notes": "Manufacturing, warehouses, chemical facilities, hazmat risk"
+    },
+    "residential": {
+      "risk_level": "low",
+      "population_density": "medium",
+      "coordinates": {
+        "latitude": 40.7614,
+        "longitude": -73.9776
+      },
+      "hospitals": [
+        {
+          "name": "Residential Hospital",
+          "distance_km": 3.5
+        }
+      ],
+      "police_stations": [
+        {
+          "name": "Residential Precinct",
+          "distance_km": 2.8
+        }
+      ],
+      "fire_stations": [
+        {
+          "name": "Residential Fire Station",
+          "distance_km": 2.3
+        }
+      ],
+      "avg_response_time_min": 11.0,
+      "incident_count_24h": 12,
+      "notes": "Quiet residential area, low crime, family neighborhoods"
+    },
+    "airport": {
+      "risk_level": "critical",
+      "population_density": "high",
+      "coordinates": {
+        "latitude": 40.6413,
+        "longitude": -73.7781
+      },
+      "hospitals": [
+        {
+          "name": "Airport Hospital",
+          "distance_km": 1.5
+        },
+        {
+          "name": "Emergency Medical Complex",
+          "distance_km": 2.0
+        }
+      ],
+      "police_stations": [
+        {
+          "name": "Airport Police",
+          "distance_km": 0.5
+        },
+        {
+          "name": "TSA Security",
+          "distance_km": 0.2
+        }
+      ],
+      "fire_stations": [
+        {
+          "name": "Airport Fire Station",
+          "distance_km": 0.3
+        },
+        {
+          "name": "Crash Fire Rescue",
+          "distance_km": 0.5
+        }
+      ],
+      "avg_response_time_min": 5.0,
+      "incident_count_24h": 28,
+      "notes": "Critical infrastructure, high security, rapid response capability"
+    }
+  }
+}

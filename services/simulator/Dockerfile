@@ -16,8 +16,8 @@ COPY simulator.py .
 COPY event_generators/ ./event_generators/
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import socket; socket.create_connection(('127.0.0.1', 9000), timeout=10)"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD pgrep -f simulator.py || exit 1
 
 # Run simulator
 CMD ["python", "simulator.py"]

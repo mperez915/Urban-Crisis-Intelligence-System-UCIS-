@@ -57,19 +57,28 @@ public class RabbitMQService {
 
     /**
      * Declare exchanges and queues
+     *
+     * Flow:
+     * 1. Simulator publishes raw events to "ucis.events" exchange with routing key "events.*"
+     * 2. Enricher consumes from "ucis.events" (pattern: events.#)
+     * 3. Enricher publishes enriched events to "ucis.events" with routing key "events.enriched.*"
+     * 4. CEP Engine consumes enriched events from "ucis.events" (pattern: events.enriched.#)
+     * 5. CEP detects patterns and publishes complex events to "ucis.complex"
      */
     private void declareInfrastructure() throws IOException {
-        // Exchange for receiving events
+        // Exchange for receiving events from Simulator and Enricher
         channel.exchangeDeclare("ucis.events", "topic", true);
 
-        // Exchange for publishing complex events
+        // Exchange for publishing complex events (alerts) detected by CEP
         channel.exchangeDeclare("ucis.complex", "topic", true);
 
-        // Queue for CEP engine
+        // Queue for CEP engine - consumes ENRICHED events (from Enricher output)
+        // NOTE: CEP must consume "events.enriched.*" NOT raw "events.*"
         channel.queueDeclare("ucis.cep.events", true, false, false, null);
-        channel.queueBind("ucis.cep.events", "ucis.events", "events.#");
+        channel.queueBind("ucis.cep.events", "ucis.events", "events.enriched.#");
 
         log.info("RabbitMQ infrastructure initialized");
+        log.info("CEP Engine listening to: events.enriched.# (enriched events from Enricher)");
     }
 
     /**

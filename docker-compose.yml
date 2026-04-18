@@ -19,7 +19,8 @@ services:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   # 🗄️ Component 5: MongoDB Database
@@ -41,7 +42,8 @@ services:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   # 🧩 Component 1: Multi-Domain Simulator
@@ -55,7 +57,7 @@ services:
       RABBITMQ_PORT: ${RABBITMQ_PORT}
       RABBITMQ_USERNAME: ${RABBITMQ_USERNAME}
       RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
-      MONGO_URI: mongodb://admin:admin123@mongodb:27017/ucis_db?authSource=admin
+      MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@${MONGO_HOST}:${MONGO_PORT}/ucis_db?authSource=admin
       EVENT_RATE: ${EVENT_RATE}
       LOG_LEVEL: ${LOG_LEVEL}
     depends_on:

@@ -38,20 +38,115 @@ async def health_check():
 
 
 class ContextProvider:
-    """Provides contextual enrichment data"""
+    """Provides contextual enrichment data from static configuration and optional MongoDB"""
 
-    def __init__(self):
-        self.risk_zones = {
-            "downtown": {"risk_level": "high", "population_density": "very_high"},
-            "suburbs": {"risk_level": "medium", "population_density": "medium"},
-            "industrial": {"risk_level": "high", "population_density": "low"},
-            "residential": {"risk_level": "low", "population_density": "medium"},
-            "airport": {"risk_level": "critical", "population_density": "high"},
+    def __init__(self, config_file: str = "/app/config/zones/zone_context.json"):
+        """
+        Initialize context provider with zone definitions
+
+        Args:
+            config_file: Path to JSON file with zone context data
+        """
+        self.zone_context = {}
+        self.config_file = config_file
+
+        # Load from JSON file
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, "r") as f:
+                    data = json.load(f)
+                    self.zone_context = data.get("zones", {})
+                logger.info(f"Loaded {len(self.zone_context)} zones from {config_file}")
+            else:
+                logger.warning(f"Config file not found: {config_file}, using defaults")
+                self._load_defaults()
+        except Exception as e:
+            logger.error(f"Error loading config: {e}, using defaults")
+            self._load_defaults()
+
+    def _load_defaults(self):
+        """Load default zone context when file is not available"""
+        self.zone_context = {
+            "downtown": {
+                "risk_level": "high",
+                "population_density": "very_high",
+                "coordinates": {"latitude": 40.7128, "longitude": -74.0060},
+                "hospitals": [
+                    {"name": "Downtown Hospital", "distance_km": 2.3},
+                    {"name": "Central Medical", "distance_km": 1.8},
+                ],
+                "police_stations": [
+                    {"name": "Downtown Precinct", "distance_km": 1.8},
+                ],
+                "avg_response_time_min": 8.5,
+            },
+            "suburbs": {
+                "risk_level": "medium",
+                "population_density": "medium",
+                "coordinates": {"latitude": 40.7580, "longitude": -73.9855},
+                "hospitals": [
+                    {"name": "Suburbs Medical", "distance_km": 5.2},
+                ],
+                "police_stations": [
+                    {"name": "Suburbs Precinct", "distance_km": 4.5},
+                ],
+                "avg_response_time_min": 12.0,
+            },
+            "industrial": {
+                "risk_level": "high",
+                "population_density": "low",
+                "coordinates": {"latitude": 40.7489, "longitude": -74.0040},
+                "hospitals": [
+                    {"name": "Industrial Hospital", "distance_km": 4.2},
+                ],
+                "police_stations": [
+                    {"name": "Industrial Precinct", "distance_km": 3.5},
+                ],
+                "avg_response_time_min": 10.5,
+            },
+            "residential": {
+                "risk_level": "low",
+                "population_density": "medium",
+                "coordinates": {"latitude": 40.7614, "longitude": -73.9776},
+                "hospitals": [
+                    {"name": "Residential Hospital", "distance_km": 3.5},
+                ],
+                "police_stations": [
+                    {"name": "Residential Precinct", "distance_km": 2.8},
+                ],
+                "avg_response_time_min": 11.0,
+            },
+            "airport": {
+                "risk_level": "critical",
+                "population_density": "high",
+                "coordinates": {"latitude": 40.6413, "longitude": -73.7781},
+                "hospitals": [
+                    {"name": "Airport Hospital", "distance_km": 1.5},
+                    {"name": "Emergency Medical", "distance_km": 2.0},
+                ],
+                "police_stations": [
+                    {"name": "Airport Police", "distance_km": 0.5},
+                ],
+                "avg_response_time_min": 5.0,
+            },
         }
+        logger.info(f"Loaded {len(self.zone_context)} default zones")
 
     def get_zone_context(self, zone: str) -> Dict[str, Any]:
-        """Get geographic context for a zone"""
-        return self.risk_zones.get(zone, {"risk_level": "unknown"})
+        """
+        Get complete geographic context for a zone
+
+        Args:
+            zone: Zone identifier
+
+        Returns:
+            Dictionary with zone context or empty dict if zone not found
+        """
+        if zone not in self.zone_context:
+            logger.warning(f"Zone not found: {zone}")
+            return {"risk_level": "unknown"}
+
+        return self.zone_context[zone].copy()
 
 
 class EventEnricher:
@@ -141,17 +236,29 @@ class EventEnricher:
                 "enriched_by": "enricher-v1",
             }
 
-            # Add geographic coordinates if available
-            if zone in ["downtown", "airport"]:
-                enriched["enrichment"]["coordinates"] = {
-                    "latitude": 40.7128 + (hash(zone) % 100) / 10000,
-                    "longitude": -74.0060 + (hash(zone) % 100) / 10000,
-                }
+            # Add geographic coordinates from zone_context (available for all zones)
+            coords = zone_context.get("coordinates")
+            if coords:
+                enriched["enrichment"]["coordinates"] = coords
 
             return enriched
         except Exception as e:
             logger.error(f"Error enriching event: {e}")
             return event
+
+    def save_enriched_event(self, event: Dict[str, Any]):
+        """Persist enriched event to MongoDB"""
+        try:
+            db = self.mongo.ucis_db
+            doc = event.copy()
+            doc["created_at"] = datetime.utcnow()
+            db.events.update_one(
+                {"id": doc["id"]},
+                {"$set": doc},
+                upsert=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save enriched event: {e}")
 
     def process_event(self, ch, method, properties, body):
         """RabbitMQ message callback"""
@@ -161,6 +268,9 @@ class EventEnricher:
 
             # Enrich event
             enriched_event = self.enrich_event(event)
+
+            # Persist enriched event to MongoDB (upsert over the raw event the simulator wrote)
+            self.save_enriched_event(enriched_event)
 
             # Publish enriched event
             routing_key = f"events.enriched.{event.get('domain')}.{event.get('type')}"
