@@ -18,7 +18,7 @@
       "auto_delete": false,
       "exclusive": false,
       "type": "classic"
-    },
+    }
   ],
   "exchanges": [
     {
@@ -56,7 +56,7 @@
       "vhost": "/",
       "routing_key": "events.#",
       "arguments": {}
-    },
+    }
   ],
   "users": [
     {
