@@ -70,14 +70,16 @@ function App() {
         setPatterns(res.data.patterns || []);
 
       } else if (activeTab === 'dashboard') {
-        const [eventRes, alertRes, statsRes] = await Promise.all([
-          axios.get(`${API_URL}/events?limit=20`),
-          axios.get(`${API_URL}/events/complex?limit=20`),
+        const [eventRes, alertRes, statsRes, patternsRes] = await Promise.all([
+          axios.get(`${API_URL}/events?limit=100`),
+          axios.get(`${API_URL}/events/complex?limit=100`),
           axios.get(`${API_URL}/stats/events-per-minute`),
+          axios.get(`${API_URL}/patterns`),
         ]);
         setEvents(eventRes.data.events || []);
         setComplexEvents(alertRes.data.events || []);
         setStats(statsRes.data || {});
+        setPatterns(patternsRes.data.patterns || []);
       }
     } catch (err) {
       setError(err.message || 'Failed to fetch data');
@@ -171,7 +173,7 @@ function App() {
 
         <div className="tab-navigation">
           {[
-            { id: 'dashboard', label: '📊 Dashboard' },
+            { id: 'dashboard', label: '📊 Overview' },
             { id: 'alerts',    label: `🚨 Alerts (${complexEvents.length})` },
             { id: 'events',    label: `📋 Events (${events.length})` },
             { id: 'patterns',  label: `⚙️ Patterns (${patterns.length})` },
