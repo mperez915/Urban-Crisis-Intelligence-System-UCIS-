@@ -289,6 +289,28 @@ def server_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 
+def seed_default_patterns():
+    if db.patterns.count_documents({}) > 0:
+        return
+    now = datetime.utcnow().isoformat() + "Z"
+    defaults = [
+        {"pattern_id": "high_traffic_congestion_enriched", "name": "High Traffic Congestion in Risk Zone", "description": "Detects sustained high-severity traffic congestion in high-risk zones.", "epl_rule": "SELECT zone, COUNT(*) as incident_count, AVG(average_speed_kmh) as avg_speed FROM TrafficEvent(type='congestion', severity in ('high','critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 2", "severity": "high", "enabled": True, "input_domains": ["traffic"]},
+        {"pattern_id": "accident_with_insufficient_response", "name": "Critical Accident with Insufficient Emergency Response", "description": "Detects critical traffic accidents in zones with limited hospital or police access.", "epl_rule": "SELECT zone, type, severity FROM TrafficEvent WHERE type='accident' AND severity='critical'", "severity": "critical", "enabled": True, "input_domains": ["traffic"]},
+        {"pattern_id": "hazardous_weather_in_critical_zone", "name": "Severe Weather in Critical Infrastructure Zone", "description": "Detects severe weather events correlating with accidents in critical zones.", "epl_rule": "SELECT * FROM PATTERN [c=ClimateEvent(type='storm', severity='high') -> t=TrafficEvent(type='accident')] WHERE c.zone = t.zone", "severity": "critical", "enabled": True, "input_domains": ["climate", "traffic"]},
+        {"pattern_id": "air_quality_health_emergency_correlation", "name": "Poor Air Quality Triggers Health Emergencies", "description": "Correlates poor air quality with respiratory/cardiac emergency calls.", "epl_rule": "SELECT a.zone, a.aqi, COUNT(h) as emergency_calls FROM PATTERN [a=EnvironmentEvent(type='air_quality', severity in ('high','critical')) -> h=HealthEvent(type='emergency_call', call_type in ('respiratory','cardiac'))].win:time(30 min) WHERE a.zone = h.zone GROUP BY a.zone, a.aqi", "severity": "high", "enabled": True, "input_domains": ["environment", "health"]},
+        {"pattern_id": "crowd_alert_in_low_response_zone", "name": "Large Crowd in Zone with Limited Emergency Response", "description": "Detects large crowds in zones with limited emergency service response capability.", "epl_rule": "SELECT zone, location, SUM(estimated_population) as total_population FROM PopulationEvent(type in ('gathering','crowd_alert'), severity in ('high','critical')).win:time(5 min) GROUP BY zone, location HAVING SUM(estimated_population) > 5000", "severity": "high", "enabled": True, "input_domains": ["population"]},
+        {"pattern_id": "emergency_services_overwhelmed", "name": "Emergency Services Potentially Overwhelmed", "description": "Detects surge in emergency calls within a short time window.", "epl_rule": "SELECT zone, COUNT(*) as emergency_count FROM HealthEvent(type='emergency_call', severity in ('high','critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 5", "severity": "critical", "enabled": True, "input_domains": ["health"]},
+        {"pattern_id": "critical_pollution_spike", "name": "Critical Pollution Spike", "description": "Alerts on critical pollution levels with AQI above 400.", "epl_rule": "SELECT zone, type, severity, aqi FROM EnvironmentEvent(severity='critical').win:time(1 min) WHERE aqi > 400", "severity": "critical", "enabled": True, "input_domains": ["environment"]},
+        {"pattern_id": "multi_domain_crisis_critical_zone", "name": "Multi-Domain Crisis in Critical Infrastructure Zone", "description": "Simultaneous critical events across traffic, weather, and population in the same zone.", "epl_rule": "SELECT t.zone, COUNT(*) as event_count FROM PATTERN [t=TrafficEvent(severity='critical') and c=ClimateEvent(severity='critical') and p=PopulationEvent(severity='critical')] WHERE t.zone = c.zone AND c.zone = p.zone", "severity": "critical", "enabled": True, "input_domains": ["traffic", "climate", "population"]},
+    ]
+    for p in defaults:
+        p.update({"uses_enrichment": True, "version": 2, "created_by": "system",
+                  "created_at": now, "updated_at": now, "match_count": 0})
+    db.patterns.insert_many(defaults)
+    logger.info(f"Seeded {len(defaults)} default patterns into MongoDB")
+
+
 if __name__ == "__main__":
     logger.info("Starting UCIS API Backend...")
+    seed_default_patterns()
     app.run(host="0.0.0.0", port=5000, debug=os.getenv("FLASK_DEBUG", False))

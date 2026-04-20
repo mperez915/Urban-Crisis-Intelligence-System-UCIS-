@@ -21,13 +21,15 @@ cat .env
 
 ### Step 3: Start All Services
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
 Or with logs:
 ```bash
-docker-compose up
+docker compose up --build
 ```
+
+> The API automatically seeds the 8 default CEP patterns into MongoDB on startup if none exist, so patterns will always appear in the Overview regardless of whether this is a fresh start or a restart.
 
 ### Step 4: Verify Services
 ```bash
@@ -249,8 +251,8 @@ docker logs -f ucis-cep-engine | grep PATTERN
 
 - **Auto-refresh Dashboard**: Frontend updates every 5 seconds
 - **Check Health**: All services have `/health` endpoints
-- **Persistent Data**: MongoDB data survives `docker-compose down`
-- **Clear All**: `docker-compose down -v` (removes all data)
+- **Persistent Data**: MongoDB data survives `docker compose down`
+- **Clear All**: `docker compose down -v` (removes all data — patterns will be re-seeded automatically on next startup)
 - **Rebuild Images**: `docker-compose build --no-cache`
 
 ## 📞 Support
