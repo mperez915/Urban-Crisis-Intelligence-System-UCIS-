@@ -51,7 +51,7 @@ class SimulatorConfig:
         self.force_severity:  Optional[str]  = None
 
     def update(self, cfg_doc: dict, scenario_doc: Optional[dict]):
-        self.event_rate    = max(1, min(int(cfg_doc.get("event_rate", self.event_rate)), 500))
+        self.event_rate    = max(1, min(int(cfg_doc.get("event_rate", self.event_rate)), 20))
         self.paused        = bool(cfg_doc.get("paused", False))
         self.force_domain  = cfg_doc.get("force_domain") or None
         self.force_zone    = cfg_doc.get("force_zone") or None

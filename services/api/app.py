@@ -175,29 +175,100 @@ def delete_pattern(pattern_id):
 
 @app.route("/api/stats/events-per-minute")
 def events_per_minute():
+    """
+    Returns event counts bucketed by time.
+    Uses 10-second buckets for the last 10 minutes (good for fast simulations),
+    and falls back to 1-minute buckets for the full last hour when there are
+    enough spread-out data points.
+    The client receives both series and a 'granularity' hint.
+    """
     try:
-        one_hour_ago     = datetime.utcnow() - timedelta(hours=1)
+        now          = datetime.utcnow()
+        ten_min_ago  = now - timedelta(minutes=10)
+        one_hour_ago = now - timedelta(hours=1)
+
+        ten_min_ago_iso  = ten_min_ago.isoformat() + "Z"
         one_hour_ago_iso = one_hour_ago.isoformat() + "Z"
-        pipeline = [
+
+        def _date_expr():
+            return {"$cond": [
+                {"$ifNull": ["$created_at", False]},
+                "$created_at",
+                {"$toDate": "$timestamp"},
+            ]}
+
+        # ── 10-second buckets for last 10 minutes ──────────────────────────
+        pipeline_10s = [
+            {"$match": {"$or": [
+                {"created_at": {"$gte": ten_min_ago}},
+                {"timestamp":  {"$gte": ten_min_ago_iso}},
+            ]}},
+            {"$group": {
+                "_id": {"$dateToString": {
+                    "format": "%Y-%m-%dT%H:%M:%S0Z",   # truncate to 10s
+                    "date":   _date_expr(),
+                }},
+                "count": {"$sum": 1},
+            }},
+            {"$sort": {"_id": 1}},
+        ]
+
+        # Truncating to 10s with string manipulation: keep first 18 chars + "0Z"
+        # MongoDB doesn't have a built-in 10s bucket, so we truncate the seconds digit
+        # by flooring seconds to the nearest 10. We do this via $subtract on epoch ms.
+        pipeline_10s = [
+            {"$match": {"$or": [
+                {"created_at": {"$gte": ten_min_ago}},
+                {"timestamp":  {"$gte": ten_min_ago_iso}},
+            ]}},
+            {"$addFields": {
+                "_ts": {"$toLong": _date_expr()},
+            }},
+            {"$group": {
+                "_id": {
+                    "$subtract": ["$_ts", {"$mod": ["$_ts", 10000]}]
+                },
+                "count": {"$sum": 1},
+            }},
+            {"$sort": {"_id": 1}},
+            {"$project": {
+                "_id": {"$dateToString": {
+                    "format": "%H:%M:%S",
+                    "date": {"$toDate": "$_id"},
+                }},
+                "count": 1,
+            }},
+        ]
+
+        # ── 1-minute buckets for last hour ────────────────────────────────
+        pipeline_1m = [
             {"$match": {"$or": [
                 {"created_at": {"$gte": one_hour_ago}},
                 {"timestamp":  {"$gte": one_hour_ago_iso}},
             ]}},
             {"$group": {
                 "_id": {"$dateToString": {
-                    "format": "%Y-%m-%dT%H:%M:00Z",
-                    "date": {"$cond": [
-                        {"$ifNull": ["$created_at", False]},
-                        "$created_at",
-                        {"$toDate": "$timestamp"},
-                    ]},
+                    "format": "%H:%M",
+                    "date": _date_expr(),
                 }},
                 "count": {"$sum": 1},
             }},
             {"$sort": {"_id": 1}},
         ]
-        return jsonify({"data": list(db.events.aggregate(pipeline))}), 200
+
+        data_10s = list(db.events.aggregate(pipeline_10s))
+        data_1m  = list(db.events.aggregate(pipeline_1m))
+
+        # Choose which series to return:
+        # prefer 10s if it has more than 1 bucket (spread across time),
+        # otherwise fall back to 1m so the chart always has context.
+        if len(data_10s) > 1:
+            return jsonify({"data": data_10s, "granularity": "10s", "label": "Events per 10 s (last 10 min)"}), 200
+        else:
+            return jsonify({"data": data_1m,  "granularity": "1m",  "label": "Events per minute (last hour)"}), 200
+
     except Exception as e:
+        logger.error("Error getting events rate: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -252,7 +323,7 @@ def update_simulator_config():
         update  = {k: v for k, v in data.items() if k in allowed}
 
         if "event_rate" in update:
-            update["event_rate"] = max(1, min(int(update["event_rate"]), 500))
+            update["event_rate"] = max(1, min(int(update["event_rate"]), 20))
         if "force_domain" in update and update["force_domain"] not in (ALL_DOMAINS + [None, ""]):
             return jsonify({"error": f"Invalid domain. Choose from: {ALL_DOMAINS}"}), 400
         if "force_zone" in update and update["force_zone"] not in (ALL_ZONES + [None, ""]):
@@ -336,7 +407,7 @@ def update_scenario(scenario_id):
             if field in data:
                 update[field] = data[field] or None
         if "event_rate" in data:
-            update["event_rate"] = max(1, min(int(data["event_rate"]), 500))
+            update["event_rate"] = max(1, min(int(data["event_rate"]), 20))
         if "domain_weights" in data:
             update["domain_weights"] = _clean_weights(data["domain_weights"])
         update["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -458,7 +529,7 @@ def _clean_weights(raw: dict) -> dict:
 
 def _default_sim_config() -> dict:
     return {
-        "event_rate": 10, "paused": False,
+        "event_rate": 3, "paused": False,
         "active_scenario_id": "normal",
         "force_domain": None, "force_zone": None, "force_severity": None,
         "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -505,8 +576,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "normal",
             "name": "Normal Operations",
-            "description": "Balanced traffic across all domains at a moderate rate. Good baseline for demos.",
-            "event_rate": 10,
+            "description": "Balanced sensor readings across all domains. Good baseline for demos — low noise, occasional medium-severity events.",
+            "event_rate": 3,
             "force_severity": None,
             "force_zone": None,
             "domain_weights": {"traffic": 2, "climate": 2, "health": 2, "environment": 2, "population": 2},
@@ -514,8 +585,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "rush_hour",
             "name": "Rush Hour",
-            "description": "Heavy traffic and population movement across downtown and suburbs.",
-            "event_rate": 25,
+            "description": "Elevated traffic and population readings across downtown and suburbs, as would be seen during peak commute hours.",
+            "event_rate": 5,
             "force_severity": None,
             "force_zone": None,
             "domain_weights": {"traffic": 6, "climate": 1, "health": 2, "environment": 2, "population": 4},
@@ -523,8 +594,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "industrial_pollution",
             "name": "Industrial Pollution Spike",
-            "description": "Critical AQI readings in the industrial zone, correlating with health emergencies.",
-            "event_rate": 30,
+            "description": "Critical AQI sensor readings in the industrial zone, correlating with respiratory health emergencies nearby.",
+            "event_rate": 5,
             "force_severity": "critical",
             "force_zone": "industrial",
             "domain_weights": {"traffic": 1, "climate": 1, "health": 4, "environment": 8, "population": 1},
@@ -532,8 +603,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "mass_event",
             "name": "Mass Public Event",
-            "description": "Large crowd gathering downtown with elevated health and traffic incidents.",
-            "event_rate": 35,
+            "description": "Large crowd gathering downtown triggering population density alerts and elevated health and traffic incidents.",
+            "event_rate": 6,
             "force_severity": None,
             "force_zone": "downtown",
             "domain_weights": {"traffic": 4, "climate": 1, "health": 4, "environment": 1, "population": 8},
@@ -541,8 +612,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "storm_crisis",
             "name": "Severe Storm Crisis",
-            "description": "Extreme weather driving traffic accidents and health emergencies across all zones.",
-            "event_rate": 40,
+            "description": "Extreme weather sensor readings driving traffic accidents and health emergencies across all zones.",
+            "event_rate": 6,
             "force_severity": "high",
             "force_zone": None,
             "domain_weights": {"traffic": 4, "climate": 8, "health": 3, "environment": 2, "population": 1},
@@ -550,8 +621,8 @@ def seed_default_scenarios():
         {
             "scenario_id": "multi_domain_crisis",
             "name": "Multi-Domain Urban Crisis",
-            "description": "Simultaneous critical failures across all domains. Maximum stress test for CEP patterns.",
-            "event_rate": 60,
+            "description": "Simultaneous critical sensor failures across all domains and zones — maximum stress scenario for CEP pattern detection.",
+            "event_rate": 10,
             "force_severity": "critical",
             "force_zone": None,
             "domain_weights": {"traffic": 3, "climate": 3, "health": 3, "environment": 3, "population": 3},

@@ -377,7 +377,7 @@ function App() {
             { id: 'alerts',     label: `🚨 Alerts (${complexEvents.length})` },
             { id: 'events',     label: `📋 Events (${events.length})` },
             { id: 'patterns',   label: `⚙️ Patterns (${patterns.length})` },
-            { id: 'scenarios',  label: '🎬 Demo Control' },
+            { id: 'scenarios',  label: '🎬 Simulations' },
           ].map(tab => (
             <button key={tab.id}
               className={`tab-button ${activeTab === tab.id ? 'active' : ''}`}
@@ -447,29 +447,26 @@ function App() {
               </div>
             )}
 
-            {/* Events per minute chart */}
+            {/* Events rate chart — adapts to 10s or 1m granularity */}
             <div className="card">
-              <h3>Events Per Minute (Last Hour)</h3>
-              {stats.data && stats.data.length > 0 ? (
+              <h3>{stats.label || 'Event Rate'}</h3>
+              {stats.data && stats.data.length > 1 ? (
                 <div className="chart-container">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={stats.data}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="_id" tick={{ fontSize: 10 }}
-                        tickFormatter={v => v ? v.substring(11, 16) : ''} />
+                      <XAxis dataKey="_id" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
                       <YAxis allowDecimals={false} />
-                      <Tooltip
-                        labelFormatter={v => v ? `Time: ${v.substring(11, 16)}` : ''}
-                        formatter={val => [val, 'Events']} />
+                      <Tooltip formatter={val => [val, 'Events']} />
                       <Line type="monotone" dataKey="count" stroke="#1a3a52"
-                        dot={false} strokeWidth={2} />
+                        dot={stats.data.length < 30} strokeWidth={2} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               ) : (
                 <p style={{ color: '#888', padding: '20px 0' }}>
                   {stats.data
-                    ? 'No events in the last hour yet — simulator may be starting up.'
+                    ? 'Not enough data points yet — let the simulator run for a few seconds.'
                     : 'Loading chart data…'}
                 </p>
               )}
@@ -722,9 +719,19 @@ function App() {
           </div>
         )}
 
-        {/* ── DEMO CONTROL / SCENARIOS ─────────────────────────────────────── */}
+        {/* ── SIMULATIONS ─────────────────────────────────────────────────── */}
         {activeTab === 'scenarios' && (
           <div>
+            {/* Sensor note */}
+            <div style={{ margin: '0 0 4px', padding: '12px 16px', borderRadius: 6,
+              backgroundColor: '#fffde7', border: '1px solid #ffe082',
+              fontSize: 13, color: '#6d5c00', lineHeight: 1.6 }}>
+              <strong>📡 Note:</strong> The simulations below generate synthetic data for demonstration
+              purposes. In production, these events would be replaced by real-time readings from
+              <strong> physical urban sensors</strong> — air quality stations, traffic cameras,
+              hospital IoT devices, and infrastructure monitoring systems.
+            </div>
+
             {/* Live controls */}
             {simConfig && (
               <div className="card">
@@ -733,13 +740,12 @@ function App() {
                   <div>
                     <label className="form-label">Event Rate (evt/s)</label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <input type="range" min={1} max={200} step={1}
+                      <input type="range" min={1} max={20} step={1}
                         value={simConfig.event_rate}
                         onChange={e => setSimConfig(s => ({ ...s, event_rate: +e.target.value }))}
                         onMouseUp={e => patchSimConfig({ event_rate: +e.target.value })}
-                        onTouchEnd={e => patchSimConfig({ event_rate: +e.target.changedTouches[0].clientX })}
                         style={{ width: 160 }} />
-                      <strong style={{ minWidth: 36 }}>{simConfig.event_rate}</strong>
+                      <strong style={{ minWidth: 36 }}>{simConfig.event_rate} evt/s</strong>
                     </div>
                   </div>
 
@@ -963,9 +969,9 @@ function App() {
                 onChange={e => setScenarioForm(s => ({ ...s, description: e.target.value }))}
                 placeholder="What situation does this scenario simulate?" />
 
-              <label className="form-label">Event Rate (evt/s) — 1 to 200</label>
+              <label className="form-label">Event Rate (evt/s) — 1 to 20</label>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <input type="range" min={1} max={200} step={1}
+                <input type="range" min={1} max={20} step={1}
                   value={scenarioForm.event_rate}
                   onChange={e => setScenarioForm(s => ({ ...s, event_rate: +e.target.value }))}
                   style={{ flex: 1 }} />
