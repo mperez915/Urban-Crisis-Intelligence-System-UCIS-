@@ -1,8 +1,8 @@
 import axios from 'axios';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    CartesianGrid, Line, LineChart,
-    ResponsiveContainer, Tooltip, XAxis, YAxis
+  CartesianGrid, Line, LineChart,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { io } from 'socket.io-client';
 import './index.css';
@@ -10,32 +10,109 @@ import './index.css';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const WS_URL  = process.env.REACT_APP_WEBSOCKET_URL || 'http://localhost:8083';
 
+const SEVERITIES  = ['low', 'medium', 'high', 'critical'];
+const ALL_DOMAINS = ['traffic', 'climate', 'health', 'environment', 'population'];
+const ALL_ZONES   = ['downtown', 'suburbs', 'industrial', 'residential', 'airport'];
+const PAGE_SIZE   = 50;
+
 const EMPTY_PATTERN = {
   pattern_id: '', name: '', description: '',
   epl_rule: '', severity: 'medium', enabled: true, input_domains: [],
 };
-const SEVERITIES  = ['low', 'medium', 'high', 'critical'];
-const ALL_DOMAINS = ['traffic', 'climate', 'health', 'environment', 'population'];
-const ALL_ZONES   = ['downtown', 'suburbs', 'industrial', 'residential', 'airport'];
+
+const EMPTY_SCENARIO = {
+  scenario_id: '', name: '', description: '',
+  event_rate: 10, force_severity: '', force_zone: '',
+  domain_weights: { traffic: 1, climate: 1, health: 1, environment: 1, population: 1 },
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+const getSeverityColor = (s) =>
+  ({ critical: '#ff4444', high: '#ff9800', medium: '#ffc107', low: '#4caf50' }[s] || '#999');
+
+const getDomainIcon = (d) =>
+  ({ climate: '🌤️', traffic: '🚗', health: '🏥', environment: '🌍', population: '👥' }[d] || '📍');
+
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+};
+
+// ── Mini components ────────────────────────────────────────────────────────────
+
+const FilterBar = ({ children }) => (
+  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+    {children}
+  </div>
+);
+
+const Sel = ({ value, onChange, placeholder, options }) => (
+  <select className="form-input" style={{ width: 'auto', minWidth: 130 }}
+    value={value} onChange={e => onChange(e.target.value)}>
+    <option value="">{placeholder}</option>
+    {options.map(o => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>)}
+  </select>
+);
+
+const ClearBtn = ({ onClick }) => (
+  <button className="btn-secondary" style={{ padding: '6px 12px', fontSize: 12 }} onClick={onClick}>
+    Clear
+  </button>
+);
+
+const WsIndicator = ({ connected }) => (
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
+    fontSize: 12, color: connected ? '#4caf50' : '#aaa' }}>
+    <span style={{ width: 8, height: 8, borderRadius: '50%', display: 'inline-block',
+      backgroundColor: connected ? '#4caf50' : '#aaa' }} />
+    {connected ? 'Real-time connected' : 'Connecting…'}
+  </span>
+);
+
+const SeverityBadge = ({ level, style = {} }) => (
+  <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11,
+    backgroundColor: getSeverityColor(level), color: 'white', ...style }}>
+    {level}
+  </span>
+);
+
+// ── App ────────────────────────────────────────────────────────────────────────
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [events, setEvents]               = useState([]);
-  const [complexEvents, setComplexEvents] = useState([]);
-  const [patterns, setPatterns]           = useState([]);
-  const [stats, setStats]                 = useState({});
-  const [loading, setLoading]             = useState(false);
-  const [error, setError]                 = useState(null);
-  const [wsConnected, setWsConnected]     = useState(false);
 
-  // Filters — Events tab
+  // data
+  const [events, setEvents]             = useState([]);
+  const [eventsCount, setEventsCount]   = useState(0);
+  const [eventsSkip, setEventsSkip]     = useState(0);
+  const [complexEvents, setComplexEvents] = useState([]);
+  const [complexCount, setComplexCount] = useState(0);
+  const [patterns, setPatterns]         = useState([]);
+  const [stats, setStats]               = useState({});
+  const [topAlerts, setTopAlerts]       = useState([]);
+
+  // scenarios + sim config
+  const [scenarios, setScenarios]             = useState([]);
+  const [simConfig, setSimConfig]             = useState(null);
+  const [scenarioForm, setScenarioForm]       = useState(null);  // null = closed
+  const [scenarioFormErr, setScenarioFormErr] = useState(null);
+  const [scenarioLoading, setScenarioLoading] = useState(false);
+
+  // ui
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const [wsConnected, setWsConnected] = useState(false);
+
+  // filters — Events
   const [evtDomain,   setEvtDomain]   = useState('');
   const [evtZone,     setEvtZone]     = useState('');
   const [evtSeverity, setEvtSeverity] = useState('');
 
-  // Filters — Alerts tab
+  // filters — Alerts
   const [altPatternId,  setAltPatternId]  = useState('');
   const [altAlertLevel, setAltAlertLevel] = useState('');
+  const [altSince,      setAltSince]      = useState('60'); // minutes window
 
   // Pattern CRUD
   const [patternForm, setPatternForm] = useState(null);
@@ -44,79 +121,120 @@ function App() {
 
   const socketRef = useRef(null);
 
-  // ── WebSocket connection ────────────────────────────────────────────────────
+  // ── WebSocket ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const socket = io(WS_URL, { transports: ['websocket', 'polling'] });
     socketRef.current = socket;
-
-    socket.on('connect', () => setWsConnected(true));
+    socket.on('connect',    () => setWsConnected(true));
     socket.on('disconnect', () => setWsConnected(false));
-
-    socket.on('complex_event', (event) => {
-      setComplexEvents(prev => {
-        const updated = [event, ...prev];
-        return updated.slice(0, 100);
-      });
+    socket.on('complex_event', () => {
+      // Just bump the count so the tab badge updates; grouped list refreshes on next poll
+      setComplexCount(prev => prev + 1);
     });
-
     return () => socket.disconnect();
   }, []);
 
-  // ── REST polling (events, stats, patterns — not alerts) ────────────────────
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [activeTab, evtDomain, evtZone, evtSeverity, altPatternId, altAlertLevel]);
-
-  const fetchData = async () => {
-    setLoading(true);
-    setError(null);
+  // ── Data fetching ──────────────────────────────────────────────────────────
+  const fetchDashboard = useCallback(async () => {
     try {
-      if (activeTab === 'events') {
-        const params = new URLSearchParams({ limit: 100 });
-        if (evtDomain)   params.set('domain',   evtDomain);
-        if (evtZone)     params.set('zone',      evtZone);
-        if (evtSeverity) params.set('severity',  evtSeverity);
-        const res = await axios.get(`${API_URL}/events?${params}`);
-        setEvents(res.data.events || []);
-
-      } else if (activeTab === 'alerts') {
-        const params = new URLSearchParams({ limit: 100 });
-        if (altPatternId)  params.set('pattern_id',  altPatternId);
-        if (altAlertLevel) params.set('alert_level',  altAlertLevel);
-        const res = await axios.get(`${API_URL}/events/complex?${params}`);
-        setComplexEvents(res.data.events || []);
-
-      } else if (activeTab === 'patterns') {
-        const res = await axios.get(`${API_URL}/patterns`);
-        setPatterns(res.data.patterns || []);
-
-      } else if (activeTab === 'dashboard') {
-        const [eventRes, alertRes, statsRes, patternsRes] = await Promise.all([
-          axios.get(`${API_URL}/events?limit=100`),
-          axios.get(`${API_URL}/events/complex?limit=100`),
+      const [evtRes, alertRes, statsRes, patternsRes, topRes, scenariosRes, simRes] =
+        await Promise.all([
+          axios.get(`${API_URL}/events?limit=${PAGE_SIZE}&skip=0`),
+          axios.get(`${API_URL}/events/complex?grouped=true&since=60`),
           axios.get(`${API_URL}/stats/events-per-minute`),
           axios.get(`${API_URL}/patterns`),
+          axios.get(`${API_URL}/stats/top-alerts`),
+          axios.get(`${API_URL}/scenarios`),
+          axios.get(`${API_URL}/simulator/config`),
         ]);
-        setEvents(eventRes.data.events || []);
-        setComplexEvents(alertRes.data.events || []);
-        setStats(statsRes.data || {});
-        setPatterns(patternsRes.data.patterns || []);
-      }
+      setEvents(evtRes.data.events || []);
+      setEventsCount(evtRes.data.count || 0);
+      setEventsSkip(0);
+      setComplexEvents(alertRes.data.events || []);
+      setComplexCount(alertRes.data.count || 0);
+      setStats(statsRes.data || {});
+      setPatterns(patternsRes.data.patterns || []);
+      setTopAlerts(topRes.data.data || []);
+      setScenarios(scenariosRes.data.scenarios || []);
+      setSimConfig(simRes.data);
     } catch (err) {
-      setError(err.message || 'Failed to fetch data');
-    } finally {
-      setLoading(false);
+      setError(err.message);
     }
-  };
+  }, []);
+
+  const fetchEvents = useCallback(async (skip = 0) => {
+    const params = new URLSearchParams({ limit: PAGE_SIZE, skip });
+    if (evtDomain)   params.set('domain',   evtDomain);
+    if (evtZone)     params.set('zone',      evtZone);
+    if (evtSeverity) params.set('severity',  evtSeverity);
+    const res = await axios.get(`${API_URL}/events?${params}`);
+    if (skip === 0) {
+      setEvents(res.data.events || []);
+    } else {
+      setEvents(prev => [...prev, ...(res.data.events || [])]);
+    }
+    setEventsCount(res.data.count || 0);
+    setEventsSkip(skip);
+  }, [evtDomain, evtZone, evtSeverity]);
+
+  const fetchAlerts = useCallback(async () => {
+    const params = new URLSearchParams({ grouped: 'true' });
+    if (altPatternId)  params.set('pattern_id',  altPatternId);
+    if (altAlertLevel) params.set('alert_level',  altAlertLevel);
+    if (altSince)      params.set('since',        altSince);
+    const res = await axios.get(`${API_URL}/events/complex?${params}`);
+    setComplexEvents(res.data.events || []);
+    setComplexCount(res.data.count || 0);
+  }, [altPatternId, altAlertLevel, altSince]);
+
+  const fetchPatterns = useCallback(async () => {
+    const res = await axios.get(`${API_URL}/patterns`);
+    setPatterns(res.data.patterns || []);
+  }, []);
+
+  const fetchScenarios = useCallback(async () => {
+    const [scenRes, simRes] = await Promise.all([
+      axios.get(`${API_URL}/scenarios`),
+      axios.get(`${API_URL}/simulator/config`),
+    ]);
+    setScenarios(scenRes.data.scenarios || []);
+    setSimConfig(simRes.data);
+  }, []);
+
+  // polling
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    const run = async () => {
+      try {
+        if (activeTab === 'dashboard') await fetchDashboard();
+        else if (activeTab === 'events')   await fetchEvents(0);
+        else if (activeTab === 'alerts')   await fetchAlerts(0);
+        else if (activeTab === 'patterns') await fetchPatterns();
+        else if (activeTab === 'scenarios') await fetchScenarios();
+      } catch (err) {
+        setError(err.message || 'Failed to fetch data');
+      } finally {
+        setLoading(false);
+      }
+    };
+    run();
+    const interval = setInterval(run, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab, fetchDashboard, fetchEvents, fetchAlerts, fetchPatterns, fetchScenarios]);
+
+  // reset pagination when filters change
+  useEffect(() => { if (activeTab === 'events') fetchEvents(0).catch(() => {}); },
+    [evtDomain, evtZone, evtSeverity]); // eslint-disable-line
+  useEffect(() => { if (activeTab === 'alerts') fetchAlerts(0).catch(() => {}); },
+    [altPatternId, altAlertLevel, altSince]); // eslint-disable-line
 
   // ── Pattern CRUD ───────────────────────────────────────────────────────────
-  const openNewPattern    = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); };
-  const openEditPattern   = (p) => { setPatternForm({ ...p, input_domains: Array.isArray(p.input_domains) ? p.input_domains : [] }); setFormError(null); };
-  const closeForm         = () => { setPatternForm(null); setFormError(null); };
-  const handleFormChange  = (f, v) => setPatternForm(prev => ({ ...prev, [f]: v }));
-  const toggleDomain      = (d) => setPatternForm(prev => ({
+  const openNewPattern  = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); };
+  const openEditPattern = (p) => { setPatternForm({ ...p, input_domains: Array.isArray(p.input_domains) ? p.input_domains : [] }); setFormError(null); };
+  const closeForm       = () => { setPatternForm(null); setFormError(null); };
+  const handleFormChange = (f, v) => setPatternForm(prev => ({ ...prev, [f]: v }));
+  const toggleDomain    = (d) => setPatternForm(prev => ({
     ...prev,
     input_domains: prev.input_domains.includes(d)
       ? prev.input_domains.filter(x => x !== d)
@@ -136,7 +254,7 @@ function App() {
         await axios.put(`${API_URL}/patterns/${patternForm.pattern_id}`, data);
       }
       closeForm();
-      fetchData();
+      fetchPatterns();
     } catch (err) {
       setFormError(err.response?.data?.error || err.message);
     } finally {
@@ -147,7 +265,7 @@ function App() {
   const togglePattern = async (p) => {
     try {
       await axios.put(`${API_URL}/patterns/${p.pattern_id}`, { enabled: !p.enabled });
-      fetchData();
+      fetchPatterns();
     } catch (err) { setError(err.response?.data?.error || err.message); }
   };
 
@@ -155,54 +273,81 @@ function App() {
     if (!window.confirm(`Delete pattern "${p.name || p.pattern_id}"?`)) return;
     try {
       await axios.delete(`${API_URL}/patterns/${p.pattern_id}`);
-      fetchData();
+      fetchPatterns();
     } catch (err) { setError(err.response?.data?.error || err.message); }
   };
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  const getSeverityColor = (s) =>
-    ({ critical: '#ff4444', high: '#ff9800', medium: '#ffc107', low: '#4caf50' }[s] || '#999');
+  // ── Simulator / Scenario actions ───────────────────────────────────────────
+  const patchSimConfig = async (patch) => {
+    try {
+      const res = await axios.put(`${API_URL}/simulator/config`, patch);
+      setSimConfig(res.data);
+    } catch (err) { setError(err.response?.data?.error || err.message); }
+  };
 
-  const getDomainIcon = (d) =>
-    ({ climate: '🌤️', traffic: '🚗', health: '🏥', environment: '🌍', population: '👥' }[d] || '📍');
+  const activateScenario = async (scenarioId) => {
+    try {
+      const res = await axios.post(`${API_URL}/scenarios/${scenarioId}/activate`);
+      setSimConfig(res.data);
+    } catch (err) { setError(err.response?.data?.error || err.message); }
+  };
 
-  const FilterBar = ({ children }) => (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-      {children}
-    </div>
-  );
+  const cloneScenario = async (s) => {
+    const newId = `${s.scenario_id}_copy_${Date.now()}`;
+    try {
+      await axios.post(`${API_URL}/scenarios/${s.scenario_id}/clone`, {
+        new_scenario_id: newId,
+        new_name: `${s.name} (copy)`,
+      });
+      fetchScenarios();
+    } catch (err) { setError(err.response?.data?.error || err.message); }
+  };
 
-  const Select = ({ value, onChange, placeholder, options }) => (
-    <select className="form-input" style={{ width: 'auto', minWidth: 130 }} value={value} onChange={e => onChange(e.target.value)}>
-      <option value="">{placeholder}</option>
-      {options.map(o => <option key={o} value={o}>{o}</option>)}
-    </select>
-  );
+  const deleteScenario = async (s) => {
+    if (!window.confirm(`Delete scenario "${s.name}"?`)) return;
+    try {
+      await axios.delete(`${API_URL}/scenarios/${s.scenario_id}`);
+      fetchScenarios();
+    } catch (err) { setError(err.response?.data?.error || err.message); }
+  };
 
-  const ClearBtn = ({ onClick }) => (
-    <button className="btn-secondary" style={{ padding: '6px 12px', fontSize: 12 }} onClick={onClick}>Clear</button>
-  );
+  // Scenario form
+  const openNewScenario  = () => { setScenarioForm({ ...EMPTY_SCENARIO }); setScenarioFormErr(null); };
+  const openEditScenario = (s) => { setScenarioForm({ ...s }); setScenarioFormErr(null); };
+  const closeScenarioForm = () => { setScenarioForm(null); setScenarioFormErr(null); };
 
-  const WsIndicator = () => (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      fontSize: 12, color: wsConnected ? '#4caf50' : '#aaa',
-    }}>
-      <span style={{
-        width: 8, height: 8, borderRadius: '50%',
-        backgroundColor: wsConnected ? '#4caf50' : '#aaa',
-        display: 'inline-block',
-      }} />
-      {wsConnected ? 'Real-time connected' : 'Connecting…'}
-    </span>
-  );
+  const saveScenario = async () => {
+    setScenarioFormErr(null);
+    if (!scenarioForm.scenario_id?.trim()) { setScenarioFormErr('scenario_id is required'); return; }
+    if (!scenarioForm.name?.trim())        { setScenarioFormErr('name is required');         return; }
+    setScenarioLoading(true);
+    try {
+      if (!scenarioForm._id) {
+        await axios.post(`${API_URL}/scenarios`, scenarioForm);
+      } else {
+        const { _id, scenario_id, is_preset, created_at, ...data } = scenarioForm;
+        await axios.put(`${API_URL}/scenarios/${scenarioForm.scenario_id}`, data);
+      }
+      closeScenarioForm();
+      fetchScenarios();
+    } catch (err) {
+      setScenarioFormErr(err.response?.data?.error || err.message);
+    } finally {
+      setScenarioLoading(false);
+    }
+  };
+
+  // ── Derived values ─────────────────────────────────────────────────────────
+  const criticalAlerts   = complexEvents.filter(e => e.alert_level === 'critical').length;
+  const enabledPatterns  = patterns.filter(p => p.enabled).length;
+  const activeScenarioId = simConfig?.active_scenario_id;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
       <div className="header">
         <h1>🚨 Urban Crisis Intelligence System (UCIS)</h1>
-        <p>Real-time Crisis Detection &amp; Monitoring Dashboard &nbsp;<WsIndicator /></p>
+        <p>Real-time Crisis Detection &amp; Monitoring Dashboard &nbsp;<WsIndicator connected={wsConnected} /></p>
       </div>
 
       <div className="container">
@@ -210,10 +355,11 @@ function App() {
 
         <div className="tab-navigation">
           {[
-            { id: 'dashboard', label: '📊 Overview' },
-            { id: 'alerts',    label: `🚨 Alerts (${complexEvents.length})` },
-            { id: 'events',    label: `📋 Events (${events.length})` },
-            { id: 'patterns',  label: `⚙️ Patterns (${patterns.length})` },
+            { id: 'dashboard',  label: '📊 Overview' },
+            { id: 'alerts',     label: `🚨 Alerts (${complexEvents.length})` },
+            { id: 'events',     label: `📋 Events (${events.length})` },
+            { id: 'patterns',   label: `⚙️ Patterns (${patterns.length})` },
+            { id: 'scenarios',  label: '🎬 Simulations' },
           ].map(tab => (
             <button key={tab.id}
               className={`tab-button ${activeTab === tab.id ? 'active' : ''}`}
@@ -223,58 +369,186 @@ function App() {
           ))}
         </div>
 
-        {loading && <div className="loading">Loading...</div>}
+        {loading && <div className="loading">Loading…</div>}
 
-        {/* ── DASHBOARD ── */}
+        {/* ── DASHBOARD ───────────────────────────────────────────────────── */}
         {activeTab === 'dashboard' && (
           <div>
+            {/* KPI boxes */}
             <div className="grid">
               <div className="stat-box">
-                <div className="stat-number">{events.length}</div>
-                <div className="stat-label">Recent Events</div>
+                <div className="stat-number">{eventsCount.toLocaleString()}</div>
+                <div className="stat-label">Total Events (DB)</div>
               </div>
               <div className="stat-box">
-                <div className="stat-number" style={{ color: '#ff4444' }}>{complexEvents.length}</div>
-                <div className="stat-label">Active Alerts</div>
+                <div className="stat-number" style={{ color: '#ff4444' }}>{criticalAlerts}</div>
+                <div className="stat-label">Critical Alerts</div>
               </div>
               <div className="stat-box">
-                <div className="stat-number" style={{ color: '#ff9800' }}>{patterns.length}</div>
-                <div className="stat-label">Patterns</div>
+                <div className="stat-number" style={{ color: '#ff9800' }}>{complexEvents.length}</div>
+                <div className="stat-label">Alerts (session)</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-number" style={{ color: '#1a3a52' }}>
+                  {enabledPatterns}
+                  <span style={{ fontSize: 16, fontWeight: 'normal', color: '#888' }}>/{patterns.length}</span>
+                </div>
+                <div className="stat-label">Active Patterns</div>
               </div>
             </div>
 
-            {stats.data && (
-              <div className="card">
-                <h3>Events Per Minute (Last Hour)</h3>
+            {/* Simulator status strip */}
+            {simConfig && (
+              <div className="card" style={{ padding: '12px 20px', display: 'flex', alignItems: 'center',
+                gap: 20, flexWrap: 'wrap', background: simConfig.paused ? '#fff8e1' : '#f0f9f0' }}>
+                <strong style={{ fontSize: 13 }}>🎬 Simulator</strong>
+                <span style={{ fontSize: 13 }}>
+                  Scenario: <strong>{activeScenarioId || '—'}</strong>
+                </span>
+                <span style={{ fontSize: 13 }}>
+                  Rate: <strong>{simConfig.event_rate} evt/s</strong>
+                </span>
+                {simConfig.force_zone && (
+                  <span style={{ fontSize: 13 }}>Zone: <strong>{simConfig.force_zone}</strong></span>
+                )}
+                {simConfig.force_severity && (
+                  <SeverityBadge level={simConfig.force_severity} />
+                )}
+                <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+                  <button className={simConfig.paused ? 'btn-success' : 'btn-warning'}
+                    style={{ padding: '4px 12px', fontSize: 12 }}
+                    onClick={() => patchSimConfig({ paused: !simConfig.paused })}>
+                    {simConfig.paused ? '▶ Resume' : '⏸ Pause'}
+                  </button>
+                  <button className="btn-secondary"
+                    style={{ padding: '4px 12px', fontSize: 12 }}
+                    onClick={() => setActiveTab('scenarios')}>
+                    Manage →
+                  </button>
+                </span>
+              </div>
+            )}
+
+            {/* Events rate chart — adapts to 10s or 1m granularity */}
+            <div className="card">
+              <h3>{stats.label || 'Event Rate'}</h3>
+              {stats.data && stats.data.length > 1 ? (
                 <div className="chart-container">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={stats.data}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="_id" tick={{ fontSize: 10 }} />
-                      <YAxis />
-                      <Tooltip />
-                      <Line type="monotone" dataKey="count" stroke="#1a3a52" dot={false} />
+                      <XAxis dataKey="_id" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip formatter={val => [val, 'Events']} />
+                      <Line type="monotone" dataKey="count" stroke="#1a3a52"
+                        dot={stats.data.length < 30} strokeWidth={2} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-              </div>
-            )}
+              ) : (
+                <p style={{ color: '#888', padding: '20px 0' }}>
+                  {stats.data
+                    ? 'Not enough data points yet — let the simulator run for a few seconds.'
+                    : 'Loading chart data…'}
+                </p>
+              )}
+            </div>
 
+            {/* Pattern triggers table */}
             <div className="card">
-              <h3>Recent Alerts <small style={{ fontSize: 12, fontWeight: 'normal', color: '#888' }}>— pushed via WebSocket</small></h3>
+              <h3>Pattern Trigger Overview</h3>
+              {topAlerts.length > 0 ? (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f0f4f8' }}>
+                        {['#', 'Pattern ID', 'Name', 'Severity', 'Triggers'].map((h, i) => (
+                          <th key={h} style={{ padding: '10px 12px', borderBottom: '2px solid #ddd',
+                            fontWeight: 600, textAlign: i === 4 ? 'right' : 'left' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {topAlerts.map((row, idx) => {
+                        const pattern = patterns.find(p => p.pattern_id === row._id);
+                        return (
+                          <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
+                            <td style={{ padding: '9px 12px', color: '#888' }}>{idx + 1}</td>
+                            <td style={{ padding: '9px 12px', fontFamily: 'monospace', fontSize: 11 }}>{row._id}</td>
+                            <td style={{ padding: '9px 12px' }}>{pattern?.name || '—'}</td>
+                            <td style={{ padding: '9px 12px' }}>
+                              {pattern ? <SeverityBadge level={pattern.severity} /> : '—'}
+                            </td>
+                            <td style={{ padding: '9px 12px', textAlign: 'right', fontWeight: 600 }}>{row.count}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p style={{ color: '#888', padding: '12px 0' }}>No pattern triggers recorded yet.</p>
+              )}
+            </div>
+
+            {/* Events by domain × zone */}
+            <div className="card">
+              <h3>Events by Domain &amp; Zone <small style={{ fontWeight: 'normal', fontSize: 12, color: '#888' }}>(last {events.length} loaded)</small></h3>
+              {events.length > 0 ? (() => {
+                const byDomain = {};
+                events.forEach(e => {
+                  if (!byDomain[e.domain]) byDomain[e.domain] = { total: 0, zones: {} };
+                  byDomain[e.domain].total += 1;
+                  byDomain[e.domain].zones[e.zone] = (byDomain[e.domain].zones[e.zone] || 0) + 1;
+                });
+                return (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ backgroundColor: '#f0f4f8' }}>
+                          <th style={{ padding: '10px 12px', borderBottom: '2px solid #ddd', fontWeight: 600, textAlign: 'left' }}>Domain</th>
+                          {ALL_ZONES.map(z => (
+                            <th key={z} style={{ padding: '10px 12px', borderBottom: '2px solid #ddd', fontWeight: 600, textAlign: 'right' }}>{z}</th>
+                          ))}
+                          <th style={{ padding: '10px 12px', borderBottom: '2px solid #ddd', fontWeight: 600, textAlign: 'right' }}>Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(byDomain).sort((a, b) => b[1].total - a[1].total).map(([domain, data], idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
+                            <td style={{ padding: '9px 12px' }}>{getDomainIcon(domain)} {domain}</td>
+                            {ALL_ZONES.map(z => (
+                              <td key={z} style={{ padding: '9px 12px', textAlign: 'right',
+                                color: data.zones[z] ? '#1a3a52' : '#ccc' }}>
+                                {data.zones[z] || '0'}
+                              </td>
+                            ))}
+                            <td style={{ padding: '9px 12px', textAlign: 'right', fontWeight: 600 }}>{data.total}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })() : <p style={{ color: '#888', padding: '12px 0' }}>No event data yet.</p>}
+            </div>
+
+            {/* Recent alerts */}
+            <div className="card">
+              <h3>Recent Alerts <small style={{ fontSize: 12, fontWeight: 'normal', color: '#888' }}>— last hour</small></h3>
               {complexEvents.length > 0 ? (
                 <ul className="event-list">
-                  {complexEvents.slice(0, 5).map((alert, idx) => (
+                  {complexEvents.filter(a => {
+                    const t = new Date(a.timestamp);
+                    return !isNaN(t) && (Date.now() - t.getTime()) < 3600000;
+                  }).slice(0, 5).map((alert, idx) => (
                     <li key={idx} className={`event-item ${alert.alert_level}`}>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <strong>{alert.pattern_name || alert.pattern_id}</strong>
-                        <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                          backgroundColor: getSeverityColor(alert.alert_level), color: 'white' }}>
-                          {alert.alert_level}
-                        </span>
+                        <SeverityBadge level={alert.alert_level} />
                       </div>
                       <p style={{ fontSize: 13, margin: '4px 0' }}>Zone: {alert.zone || '—'}</p>
-                      <small>{new Date(alert.timestamp).toLocaleString()}</small>
+                      <small>{fmtTime(alert.timestamp)}</small>
                     </li>
                   ))}
                 </ul>
@@ -285,101 +559,143 @@ function App() {
           </div>
         )}
 
-        {/* ── EVENTS ── */}
+        {/* ── EVENTS ──────────────────────────────────────────────────────── */}
         {activeTab === 'events' && (
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <h3 style={{ margin: 0 }}>Recent Events</h3>
-              <small style={{ color: '#888' }}>{events.length} shown</small>
+              <small style={{ color: '#888' }}>{events.length} shown / {eventsCount.toLocaleString()} total</small>
             </div>
             <FilterBar>
-              <Select value={evtDomain}   onChange={setEvtDomain}   placeholder="All domains"   options={ALL_DOMAINS} />
-              <Select value={evtZone}     onChange={setEvtZone}     placeholder="All zones"     options={ALL_ZONES} />
-              <Select value={evtSeverity} onChange={setEvtSeverity} placeholder="All severities" options={SEVERITIES} />
+              <Sel value={evtDomain}   onChange={setEvtDomain}   placeholder="All domains"    options={ALL_DOMAINS} />
+              <Sel value={evtZone}     onChange={setEvtZone}     placeholder="All zones"      options={ALL_ZONES} />
+              <Sel value={evtSeverity} onChange={setEvtSeverity} placeholder="All severities" options={SEVERITIES} />
               {(evtDomain || evtZone || evtSeverity) &&
                 <ClearBtn onClick={() => { setEvtDomain(''); setEvtZone(''); setEvtSeverity(''); }} />}
             </FilterBar>
             {events.length > 0 ? (
-              <ul className="event-list">
-                {events.map((event, idx) => (
-                  <li key={idx} className={`event-item ${event.severity}`}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong>{getDomainIcon(event.domain)} {event.domain} — {event.type}</strong>
-                      <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                        backgroundColor: getSeverityColor(event.severity), color: 'white' }}>
-                        {event.severity}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: 13, margin: '4px 0' }}>Zone: <strong>{event.zone}</strong></p>
-                    <small>{new Date(event.timestamp).toLocaleString()}</small>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="event-list">
+                  {events.map((event, idx) => (
+                    <li key={idx} className={`event-item ${event.severity}`}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <strong>{getDomainIcon(event.domain)} {event.domain} — {event.type}</strong>
+                        <SeverityBadge level={event.severity} />
+                      </div>
+                      <p style={{ fontSize: 13, margin: '4px 0' }}>Zone: <strong>{event.zone}</strong></p>
+                      <small>{fmtTime(event.timestamp)}</small>
+                    </li>
+                  ))}
+                </ul>
+                {events.length < eventsCount && (
+                  <div style={{ textAlign: 'center', marginTop: 12 }}>
+                    <button className="btn-secondary"
+                      onClick={() => fetchEvents(eventsSkip + PAGE_SIZE).catch(() => {})}>
+                      Load more ({eventsCount - events.length} remaining)
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <p>No events match the current filters</p>
             )}
           </div>
         )}
 
-        {/* ── ALERTS ── */}
+        {/* ── ALERTS ──────────────────────────────────────────────────────── */}
         {activeTab === 'alerts' && (
           <div className="card">
+            {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h3 style={{ margin: 0 }}>Complex Events &amp; Alerts</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <WsIndicator />
-                <small style={{ color: '#888' }}>{complexEvents.length} shown</small>
+              <h3 style={{ margin: 0 }}>
+                Complex Events &amp; Alerts
+                <small style={{ fontWeight: 'normal', fontSize: 12, color: '#888', marginLeft: 8 }}>
+                  {complexEvents.length} unique pattern–zone combinations in window
+                </small>
+              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <WsIndicator connected={wsConnected} />
+                <button className="btn-secondary" style={{ fontSize: 12, padding: '4px 10px' }}
+                  onClick={() => setComplexEvents([])}>
+                  Clear session
+                </button>
               </div>
             </div>
+
+            {/* Filters */}
             <FilterBar>
-              <Select value={altPatternId}  onChange={setAltPatternId}
-                placeholder="All patterns"
-                options={[...new Set(complexEvents.map(e => e.pattern_id).filter(Boolean))]} />
-              <Select value={altAlertLevel} onChange={setAltAlertLevel} placeholder="All levels" options={SEVERITIES} />
-              {(altPatternId || altAlertLevel) &&
-                <ClearBtn onClick={() => { setAltPatternId(''); setAltAlertLevel(''); }} />}
+              <Sel value={altSince} onChange={setAltSince} placeholder="Time window"
+                options={[
+                  { value: '15',  label: 'Last 15 min' },
+                  { value: '60',  label: 'Last hour' },
+                  { value: '360', label: 'Last 6 h' },
+                  { value: '0',   label: 'All time' },
+                ]} />
+              <Sel value={altAlertLevel} onChange={setAltAlertLevel} placeholder="All severities" options={SEVERITIES} />
+              <Sel value={altPatternId} onChange={setAltPatternId} placeholder="All patterns"
+                options={patterns.map(p => ({ value: p.pattern_id, label: p.name || p.pattern_id }))} />
+              {(altPatternId || altAlertLevel || altSince !== '60') &&
+                <ClearBtn onClick={() => { setAltPatternId(''); setAltAlertLevel(''); setAltSince('60'); }} />}
             </FilterBar>
+
+            {/* Grouped table — one row per pattern+zone combination */}
             {complexEvents.length > 0 ? (
-              <ul className="event-list">
-                {complexEvents
-                  .filter(e => (!altPatternId || e.pattern_id === altPatternId) && (!altAlertLevel || e.alert_level === altAlertLevel))
-                  .map((alert, idx) => (
-                  <li key={idx} className={`event-item ${alert.alert_level}`}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <strong>🚨 {alert.pattern_name || alert.pattern_id}</strong>
-                      <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                        backgroundColor: getSeverityColor(alert.alert_level), color: 'white' }}>
-                        {alert.alert_level}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: 13, margin: '4px 0' }}>{alert.description || 'Complex event detected'}</p>
-                    <p style={{ fontSize: 13, margin: '2px 0' }}>
-                      Zone: <strong>{alert.zone || '—'}</strong>
-                      &nbsp;|&nbsp; Pattern: <code style={{ fontSize: 11 }}>{alert.pattern_id}</code>
-                    </p>
-                    <small>{new Date(alert.timestamp).toLocaleString()}</small>
-                  </li>
-                ))}
-              </ul>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f0f4f8', textAlign: 'left' }}>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Severity</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Pattern</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Zone</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600, textAlign: 'right' }}>Triggers</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {complexEvents.map((alert, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #eee',
+                        backgroundColor: alert.alert_level === 'critical' ? '#fff5f5' :
+                                         alert.alert_level === 'high'     ? '#fff8f0' : 'white' }}>
+                        <td style={{ padding: '7px 10px' }}>
+                          <SeverityBadge level={alert.alert_level} />
+                        </td>
+                        <td style={{ padding: '7px 10px', maxWidth: 280 }}>
+                          <div style={{ fontWeight: 600, fontSize: 12 }}>{alert.pattern_name || alert.pattern_id}</div>
+                          {alert.description && (
+                            <div style={{ fontSize: 11, color: '#777', marginTop: 2 }}>{alert.description}</div>
+                          )}
+                        </td>
+                        <td style={{ padding: '7px 10px', fontSize: 12 }}>{alert.zone || '—'}</td>
+                        <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700,
+                          color: alert.occurrences > 100 ? '#ff4444' : alert.occurrences > 10 ? '#ff9800' : '#333' }}>
+                          {(alert.occurrences || 1).toLocaleString()}
+                        </td>
+                        <td style={{ padding: '7px 10px', fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
+                          {fmtTime(alert.last_seen || alert.timestamp)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
-              <p style={{ color: '#888' }}>No alerts match the current filters</p>
+              <p style={{ color: '#888', padding: '20px 0' }}>No alerts in the selected time window</p>
             )}
           </div>
         )}
 
-        {/* ── PATTERNS ── */}
+        {/* ── PATTERNS ────────────────────────────────────────────────────── */}
         {activeTab === 'patterns' && (
           <div>
-            <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px' }}>
+            <div className="card" style={{ display: 'flex', justifyContent: 'space-between',
+              alignItems: 'center', padding: '12px 20px' }}>
               <h3 style={{ margin: 0 }}>CEP Patterns</h3>
               <button className="btn-primary" onClick={openNewPattern}>+ New Pattern</button>
             </div>
 
             {patterns.length > 0 ? patterns.map((pattern, idx) => (
-              <div key={idx} style={{
-                marginBottom: 12, padding: 16, backgroundColor: '#f9f9f9', borderRadius: 4,
-                borderLeft: `4px solid ${getSeverityColor(pattern.severity)}`,
-              }}>
+              <div key={idx} style={{ marginBottom: 12, padding: 16, backgroundColor: '#f9f9f9',
+                borderRadius: 4, borderLeft: `4px solid ${getSeverityColor(pattern.severity)}` }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                   <div>
                     <h4 style={{ margin: '0 0 4px' }}>{pattern.name || pattern.pattern_id}</h4>
@@ -402,31 +718,190 @@ function App() {
                   <span><strong>Status:</strong> {pattern.enabled ? '✅ Enabled' : '❌ Disabled'}</span>
                   {pattern.input_domains?.length > 0 &&
                     <span><strong>Domains:</strong> {pattern.input_domains.map(d => getDomainIcon(d) + ' ' + d).join(', ')}</span>}
-                  {pattern.match_count !== undefined &&
-                    <span><strong>Matches:</strong> {pattern.match_count}</span>}
+                  <span><strong>Matches:</strong> {pattern.match_count ?? 0}</span>
                 </div>
 
                 <details style={{ marginTop: 8 }}>
                   <summary style={{ cursor: 'pointer', fontSize: 12, color: '#555' }}>EPL Rule</summary>
-                  <pre style={{ fontSize: 11, background: '#eee', padding: 8, borderRadius: 4, overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  <pre style={{ fontSize: 11, background: '#eee', padding: 8, borderRadius: 4,
+                    overflowX: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
                     {pattern.epl_rule}
                   </pre>
                 </details>
               </div>
-            )) : (
-              <div className="card"><p>No patterns configured.</p></div>
-            )}
+            )) : <div className="card"><p>No patterns configured.</p></div>}
           </div>
         )}
 
-        {/* ── PATTERN MODAL ── */}
+        {/* ── SIMULATIONS ─────────────────────────────────────────────────── */}
+        {activeTab === 'scenarios' && (
+          <div>
+            {/* Sensor note */}
+            <div style={{ margin: '0 0 4px', padding: '12px 16px', borderRadius: 6,
+              backgroundColor: '#fffde7', border: '1px solid #ffe082',
+              fontSize: 13, color: '#6d5c00', lineHeight: 1.6 }}>
+              <strong>📡 Note:</strong> The simulations below generate synthetic data for demonstration
+              purposes. In production, these events would be replaced by real-time readings from
+              <strong> physical urban sensors</strong> — air quality stations, traffic cameras,
+              hospital IoT devices, and infrastructure monitoring systems.
+            </div>
+
+            {/* Live controls */}
+            {simConfig && (
+              <div className="card">
+                <h3>Live Simulator Controls</h3>
+                <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 12 }}>
+                  <div>
+                    <label className="form-label">Event Rate (evt/s)</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="range" min={1} max={20} step={1}
+                        value={simConfig.event_rate}
+                        onChange={e => setSimConfig(s => ({ ...s, event_rate: +e.target.value }))}
+                        onMouseUp={e => patchSimConfig({ event_rate: +e.target.value })}
+                        style={{ width: 160 }} />
+                      <strong style={{ minWidth: 36 }}>{simConfig.event_rate} evt/s</strong>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="form-label">Force Zone</label>
+                    <Sel value={simConfig.force_zone || ''}
+                      onChange={v => patchSimConfig({ force_zone: v || null })}
+                      placeholder="Any zone" options={ALL_ZONES} />
+                  </div>
+
+                  <div>
+                    <label className="form-label">Force Severity</label>
+                    <Sel value={simConfig.force_severity || ''}
+                      onChange={v => patchSimConfig({ force_severity: v || null })}
+                      placeholder="Any severity" options={SEVERITIES} />
+                  </div>
+
+                  <div style={{ marginLeft: 'auto' }}>
+                    <button
+                      className={simConfig.paused ? 'btn-success' : 'btn-warning'}
+                      style={{ fontSize: 15, padding: '8px 20px' }}
+                      onClick={() => patchSimConfig({ paused: !simConfig.paused })}>
+                      {simConfig.paused ? '▶ Resume Simulator' : '⏸ Pause Simulator'}
+                    </button>
+                  </div>
+                </div>
+
+                {activeScenarioId && (
+                  <p style={{ marginTop: 12, fontSize: 13, color: '#555' }}>
+                    Active scenario: <strong>{activeScenarioId}</strong>
+                    {' — '}these live controls override the scenario&apos;s defaults until the next scenario activation.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Scenario list */}
+            <div className="card" style={{ display: 'flex', justifyContent: 'space-between',
+              alignItems: 'center', padding: '12px 20px' }}>
+              <h3 style={{ margin: 0 }}>Scenarios</h3>
+              <button className="btn-primary" onClick={openNewScenario}>+ New Scenario</button>
+            </div>
+
+            {/* Presets */}
+            {['is_preset', '!is_preset'].map(group => {
+              const isPreset = group === 'is_preset';
+              const list = scenarios.filter(s => !!s.is_preset === isPreset);
+              if (list.length === 0) return null;
+              return (
+                <div key={group}>
+                  <h4 style={{ margin: '16px 0 8px', color: '#555', fontSize: 13, textTransform: 'uppercase', letterSpacing: 1 }}>
+                    {isPreset ? '📦 Built-in Presets' : '✏️ Custom Scenarios'}
+                  </h4>
+                  {list.map((s, idx) => {
+                    const isActive = activeScenarioId === s.scenario_id;
+                    return (
+                      <div key={idx} style={{ marginBottom: 10, padding: 16, borderRadius: 6,
+                        backgroundColor: isActive ? '#e8f5e9' : '#f9f9f9',
+                        border: isActive ? '2px solid #43a047' : '1px solid #e0e0e0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <h4 style={{ margin: 0 }}>{s.name}</h4>
+                              {isActive && (
+                                <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10,
+                                  backgroundColor: '#43a047', color: 'white' }}>● ACTIVE</span>
+                              )}
+                              <code style={{ fontSize: 11, color: '#888' }}>{s.scenario_id}</code>
+                            </div>
+                            {s.description && (
+                              <p style={{ margin: '6px 0 8px', fontSize: 13, color: '#555' }}>{s.description}</p>
+                            )}
+                            {/* Scenario params */}
+                            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: '#444' }}>
+                              <span>⚡ <strong>{s.event_rate}</strong> evt/s</span>
+                              {s.force_zone     && <span>📍 Zone: <strong>{s.force_zone}</strong></span>}
+                              {s.force_severity && <span>🔴 Min severity: <SeverityBadge level={s.force_severity} /></span>}
+                            </div>
+                            {/* Domain weights */}
+                            {s.domain_weights && (
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                                {ALL_DOMAINS.map(d => {
+                                  const w = s.domain_weights[d] ?? 1;
+                                  const maxW = Math.max(...Object.values(s.domain_weights));
+                                  const pct  = Math.round((w / maxW) * 100);
+                                  return (
+                                    <div key={d} style={{ textAlign: 'center', width: 60 }}>
+                                      <div style={{ fontSize: 10, color: '#888', marginBottom: 2 }}>{getDomainIcon(d)}</div>
+                                      <div style={{ height: 4, borderRadius: 2, backgroundColor: '#e0e0e0', overflow: 'hidden' }}>
+                                        <div style={{ height: '100%', width: `${pct}%`, backgroundColor: '#1a3a52' }} />
+                                      </div>
+                                      <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>{w}x</div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Actions */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0 }}>
+                            <button
+                              className={isActive ? 'btn-secondary' : 'btn-primary'}
+                              style={{ fontSize: 12, padding: '6px 14px' }}
+                              onClick={() => activateScenario(s.scenario_id)}
+                              disabled={isActive}>
+                              {isActive ? '✅ Active' : '▶ Activate'}
+                            </button>
+                            <button className="btn-secondary" style={{ fontSize: 12, padding: '6px 14px' }}
+                              onClick={() => cloneScenario(s)}>
+                              📋 Clone
+                            </button>
+                            {!s.is_preset && (
+                              <>
+                                <button className="btn-secondary" style={{ fontSize: 12, padding: '6px 14px' }}
+                                  onClick={() => openEditScenario(s)}>
+                                  ✏️ Edit
+                                </button>
+                                <button className="btn-danger" style={{ fontSize: 12, padding: '6px 14px' }}
+                                  onClick={() => deleteScenario(s)}>
+                                  🗑 Delete
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── PATTERN MODAL ───────────────────────────────────────────────── */}
         {patternForm && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
             <div style={{ background: 'white', borderRadius: 8, padding: 24,
               width: '90%', maxWidth: 640, maxHeight: '90vh', overflowY: 'auto' }}>
               <h3 style={{ marginTop: 0 }}>{patternForm._id ? 'Edit Pattern' : 'New Pattern'}</h3>
-
               {formError && <div className="error" style={{ marginBottom: 12 }}>{formError}</div>}
 
               <label className="form-label">Pattern ID *</label>
@@ -470,13 +945,97 @@ function App() {
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
                 <input type="checkbox" checked={patternForm.enabled}
                   onChange={e => handleFormChange('enabled', e.target.checked)} />
-                Enabled (CEP Engine picks up changes on next event)
+                Enabled
               </label>
 
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button className="btn-secondary" onClick={closeForm} disabled={formLoading}>Cancel</button>
                 <button className="btn-primary"   onClick={savePattern} disabled={formLoading}>
                   {formLoading ? 'Saving…' : 'Save Pattern'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── SCENARIO MODAL ──────────────────────────────────────────────── */}
+        {scenarioForm && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+            <div style={{ background: 'white', borderRadius: 8, padding: 24,
+              width: '90%', maxWidth: 680, maxHeight: '90vh', overflowY: 'auto' }}>
+              <h3 style={{ marginTop: 0 }}>{scenarioForm._id ? 'Edit Scenario' : 'New Scenario'}</h3>
+              {scenarioFormErr && <div className="error" style={{ marginBottom: 12 }}>{scenarioFormErr}</div>}
+
+              <label className="form-label">Scenario ID * <small style={{ fontWeight: 'normal', color: '#888' }}>(slug, no spaces)</small></label>
+              <input className="form-input" value={scenarioForm.scenario_id}
+                disabled={!!scenarioForm._id}
+                onChange={e => setScenarioForm(s => ({ ...s, scenario_id: e.target.value.replace(/\s+/g, '_') }))}
+                placeholder="e.g. airport_flood" />
+
+              <label className="form-label">Name *</label>
+              <input className="form-input" value={scenarioForm.name}
+                onChange={e => setScenarioForm(s => ({ ...s, name: e.target.value }))}
+                placeholder="Short display name" />
+
+              <label className="form-label">Description</label>
+              <textarea className="form-input" rows={2} value={scenarioForm.description}
+                onChange={e => setScenarioForm(s => ({ ...s, description: e.target.value }))}
+                placeholder="What situation does this scenario simulate?" />
+
+              <label className="form-label">Event Rate (evt/s) — 1 to 20</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <input type="range" min={1} max={20} step={1}
+                  value={scenarioForm.event_rate}
+                  onChange={e => setScenarioForm(s => ({ ...s, event_rate: +e.target.value }))}
+                  style={{ flex: 1 }} />
+                <strong style={{ minWidth: 40 }}>{scenarioForm.event_rate}</strong>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <label className="form-label">Force Zone <small style={{ fontWeight: 'normal', color: '#888' }}>(optional)</small></label>
+                  <Sel value={scenarioForm.force_zone || ''}
+                    onChange={v => setScenarioForm(s => ({ ...s, force_zone: v || '' }))}
+                    placeholder="Any zone" options={ALL_ZONES} />
+                </div>
+                <div>
+                  <label className="form-label">Min Severity <small style={{ fontWeight: 'normal', color: '#888' }}>(optional)</small></label>
+                  <Sel value={scenarioForm.force_severity || ''}
+                    onChange={v => setScenarioForm(s => ({ ...s, force_severity: v || '' }))}
+                    placeholder="Any severity" options={SEVERITIES} />
+                </div>
+              </div>
+
+              <label className="form-label" style={{ marginTop: 16 }}>
+                Domain Weights <small style={{ fontWeight: 'normal', color: '#888' }}>1 (rare) → 10 (dominant)</small>
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10, marginBottom: 16 }}>
+                {ALL_DOMAINS.map(d => (
+                  <div key={d} style={{ padding: '10px 12px', border: '1px solid #e0e0e0',
+                    borderRadius: 6, backgroundColor: '#fafafa' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                      <label style={{ fontSize: 13, fontWeight: 600 }}>{getDomainIcon(d)} {d}</label>
+                      <strong style={{ fontSize: 13 }}>{scenarioForm.domain_weights[d] ?? 1}</strong>
+                    </div>
+                    <input type="range" min={1} max={10} step={1}
+                      value={scenarioForm.domain_weights[d] ?? 1}
+                      onChange={e => setScenarioForm(s => ({
+                        ...s,
+                        domain_weights: { ...s.domain_weights, [d]: +e.target.value },
+                      }))}
+                      style={{ width: '100%' }} />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#aaa' }}>
+                      <span>Rare</span><span>Dominant</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button className="btn-secondary" onClick={closeScenarioForm} disabled={scenarioLoading}>Cancel</button>
+                <button className="btn-primary"   onClick={saveScenario}      disabled={scenarioLoading}>
+                  {scenarioLoading ? 'Saving…' : 'Save Scenario'}
                 </button>
               </div>
             </div>

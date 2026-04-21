@@ -2,23 +2,19 @@
 """
 UCIS Multi-Domain Event Simulator
 
-Generates realistic IoT events from multiple domains:
-- Climate (temperature, humidity, storms)
-- Traffic (congestion, accidents)
-- Health (emergency calls, ambulance dispatch)
-- Environment (air quality, pollution)
-- Population Density (crowds, gatherings)
-
-All events are published to RabbitMQ with proper routing keys AND persisted to MongoDB.
+Reads a live control document from MongoDB (simulator_config) and an active
+scenario document (scenarios) every CONFIG_POLL_INTERVAL seconds, so the
+dashboard can change rate, scenario, zone, severity, and domain weights at
+runtime without restarting the container.
 """
 
 import json
 import logging
 import os
-import sys
+import random
 import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pika
 from event_generators import (
@@ -30,185 +26,232 @@ from event_generators import (
 )
 from pymongo import MongoClient
 
-# Configure logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+CONFIG_POLL_INTERVAL = 3   # seconds between MongoDB config re-reads
+ALL_DOMAINS = ["traffic", "climate", "health", "environment", "population"]
 
-class EventSimulator:
-    """Main event simulator that orchestrates all event generators"""
+# Fallback weights used when no scenario is loaded
+DEFAULT_WEIGHTS = {d: 1 for d in ALL_DOMAINS}
+
+
+class SimulatorConfig:
+    """Live configuration, refreshed from MongoDB every CONFIG_POLL_INTERVAL s."""
 
     def __init__(self):
-        self.rabbitmq_host = os.getenv("RABBITMQ_HOST", "localhost")
-        self.rabbitmq_port = int(os.getenv("RABBITMQ_PORT", 5672))
+        self.event_rate:      int            = int(os.getenv("EVENT_RATE", 10))
+        self.paused:          bool           = False
+        self.active_scenario: Optional[dict] = None
+        self.force_domain:    Optional[str]  = None
+        self.force_zone:      Optional[str]  = None
+        self.force_severity:  Optional[str]  = None
+
+    def update(self, cfg_doc: dict, scenario_doc: Optional[dict]):
+        self.event_rate    = max(1, min(int(cfg_doc.get("event_rate", self.event_rate)), 20))
+        self.paused        = bool(cfg_doc.get("paused", False))
+        self.force_domain  = cfg_doc.get("force_domain") or None
+        self.force_zone    = cfg_doc.get("force_zone") or None
+        self.force_severity = cfg_doc.get("force_severity") or None
+        self.active_scenario = scenario_doc  # may be None → use DEFAULT_WEIGHTS
+
+    @property
+    def domain_weights(self) -> Dict[str, int]:
+        if self.active_scenario and "domain_weights" in self.active_scenario:
+            w = self.active_scenario["domain_weights"]
+            # ensure all domains present with at least weight 1
+            return {d: max(1, int(w.get(d, 1))) for d in ALL_DOMAINS}
+        return DEFAULT_WEIGHTS.copy()
+
+    @property
+    def sleep_interval(self) -> float:
+        return 1.0 / self.event_rate
+
+    @property
+    def scenario_name(self) -> str:
+        if self.active_scenario:
+            return self.active_scenario.get("name", self.active_scenario.get("scenario_id", "?"))
+        return "default"
+
+
+class EventSimulator:
+
+    def __init__(self):
+        self.rabbitmq_host     = os.getenv("RABBITMQ_HOST", "localhost")
+        self.rabbitmq_port     = int(os.getenv("RABBITMQ_PORT", 5672))
         self.rabbitmq_username = os.getenv("RABBITMQ_USERNAME", "guest")
         self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
-        self.event_rate = int(os.getenv("EVENT_RATE", 100))
-
-        self.mongo_uri = os.getenv(
+        self.mongo_uri         = os.getenv(
             "MONGO_URI",
             "mongodb://admin:admin123@localhost:27017/ucis_db?authSource=admin",
         )
 
         self.connection = None
-        self.channel = None
-        self.mongo = None
+        self.channel    = None
+        self.mongo      = None
+        self.config     = SimulatorConfig()
 
-        # Initialize event generators
-        self.generators = {
-            "climate": ClimateEventGenerator(),
-            "traffic": TrafficEventGenerator(),
-            "health": HealthEventGenerator(),
+        self.generators: Dict[str, Any] = {
+            "climate":     ClimateEventGenerator(),
+            "traffic":     TrafficEventGenerator(),
+            "health":      HealthEventGenerator(),
             "environment": EnvironmentEventGenerator(),
-            "population": PopulationEventGenerator(),
+            "population":  PopulationEventGenerator(),
         }
 
-        logger.info(
-            f"Event Simulator initialized with rate: {self.event_rate} events/sec"
-        )
+        self._last_config_poll = 0.0
+        logger.info("Simulator initialised — config poll every %ds", CONFIG_POLL_INTERVAL)
+
+    # ── Connections ────────────────────────────────────────────────────────────
 
     def connect_rabbitmq(self):
-        """Establish connection to RabbitMQ"""
-        try:
-            credentials = pika.PlainCredentials(
-                self.rabbitmq_username, self.rabbitmq_password
-            )
-            parameters = pika.ConnectionParameters(
-                host=self.rabbitmq_host,
-                port=self.rabbitmq_port,
-                credentials=credentials,
-                connection_attempts=5,
-                retry_delay=2,
-            )
-            self.connection = pika.BlockingConnection(parameters)
-            self.channel = self.connection.channel()
-            logger.info(
-                f"Connected to RabbitMQ at {self.rabbitmq_host}:{self.rabbitmq_port}"
-            )
-
-            # Declare exchange
-            self.channel.exchange_declare(
-                exchange="ucis.events", exchange_type="topic", durable=True
-            )
-        except Exception as e:
-            logger.error(f"Failed to connect to RabbitMQ: {e}")
-            raise
+        credentials = pika.PlainCredentials(self.rabbitmq_username, self.rabbitmq_password)
+        params = pika.ConnectionParameters(
+            host=self.rabbitmq_host, port=self.rabbitmq_port,
+            credentials=credentials, connection_attempts=5, retry_delay=2,
+        )
+        self.connection = pika.BlockingConnection(params)
+        self.channel    = self.connection.channel()
+        self.channel.exchange_declare(exchange="ucis.events", exchange_type="topic", durable=True)
+        logger.info("Connected to RabbitMQ at %s:%s", self.rabbitmq_host, self.rabbitmq_port)
 
     def connect_mongodb(self):
-        """Connect to MongoDB"""
+        self.mongo = MongoClient(self.mongo_uri)
+        self.mongo.ucis_db.command("ping")
+        logger.info("Connected to MongoDB")
+
+    # ── Config polling ─────────────────────────────────────────────────────────
+
+    def _poll_config(self):
+        now = time.time()
+        if now - self._last_config_poll < CONFIG_POLL_INTERVAL:
+            return
+        self._last_config_poll = now
         try:
-            self.mongo = MongoClient(self.mongo_uri)
-            db = self.mongo.ucis_db
-            db.command("ping")
-            logger.info("Connected to MongoDB")
-        except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-            raise
+            cfg_doc = self.mongo.ucis_db.simulator_config.find_one({"_id": "main"}) or {}
+
+            scenario_doc = None
+            sid = cfg_doc.get("active_scenario_id")
+            if sid:
+                scenario_doc = self.mongo.ucis_db.scenarios.find_one({"scenario_id": sid})
+                # Scenario may override event_rate and force_* fields if not set in cfg_doc
+                if scenario_doc:
+                    if "event_rate" not in cfg_doc:
+                        cfg_doc["event_rate"] = scenario_doc.get("event_rate", 10)
+                    if not cfg_doc.get("force_zone"):
+                        cfg_doc["force_zone"] = scenario_doc.get("force_zone")
+                    if not cfg_doc.get("force_severity"):
+                        cfg_doc["force_severity"] = scenario_doc.get("force_severity")
+
+            old_rate     = self.config.event_rate
+            old_scenario = self.config.scenario_name
+            self.config.update(cfg_doc, scenario_doc)
+
+            if self.config.event_rate != old_rate or self.config.scenario_name != old_scenario:
+                logger.info(
+                    "Config → rate=%d  scenario='%s'  paused=%s  zone=%s  severity=%s",
+                    self.config.event_rate, self.config.scenario_name,
+                    self.config.paused, self.config.force_zone, self.config.force_severity,
+                )
+        except Exception as exc:
+            logger.warning("Config poll failed: %s", exc)
+
+    # ── Domain selection ───────────────────────────────────────────────────────
+
+    def _pick_domain(self) -> str:
+        if self.config.force_domain and self.config.force_domain in self.generators:
+            return self.config.force_domain
+        weights  = self.config.domain_weights
+        domains  = list(weights.keys())
+        w_values = [weights[d] for d in domains]
+        return random.choices(domains, weights=w_values, k=1)[0]
+
+    # ── Overrides ──────────────────────────────────────────────────────────────
+
+    def _apply_overrides(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        if self.config.force_zone:
+            event["zone"] = self.config.force_zone
+        if self.config.force_severity and "severity" in event:
+            event["severity"] = self.config.force_severity
+        return event
+
+    # ── Publish / persist ──────────────────────────────────────────────────────
 
     def publish_event(self, event: Dict[str, Any], domain: str) -> bool:
-        """
-        Publish event to RabbitMQ
-
-        Args:
-            event: Event dictionary
-            domain: Event domain (climate, traffic, etc.)
-
-        Returns:
-            True if published successfully
-        """
         try:
             routing_key = f"events.{domain}.{event.get('type', 'generic')}"
-
             self.channel.basic_publish(
                 exchange="ucis.events",
                 routing_key=routing_key,
                 body=json.dumps(event),
                 properties=pika.BasicProperties(
-                    content_type="application/json",
-                    delivery_mode=2,  # Persistent
+                    content_type="application/json", delivery_mode=2,
                 ),
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to publish event: {e}")
+            logger.error("Publish failed: %s", e)
             return False
 
     def save_event(self, event: Dict[str, Any]) -> bool:
-        """
-        Save event to MongoDB
-
-        Args:
-            event: Event dictionary
-
-        Returns:
-            True if saved successfully
-        """
         try:
-            db = self.mongo.ucis_db
             event["created_at"] = datetime.utcnow()
-            db.events.insert_one(event)
+            self.mongo.ucis_db.events.insert_one(event)
             return True
         except Exception as e:
-            logger.error(f"Failed to save event to MongoDB: {e}")
+            logger.error("Save failed: %s", e)
             return False
 
+    # ── Main loop ──────────────────────────────────────────────────────────────
+
     def run(self):
-        """Main simulation loop"""
         try:
-            logger.info("Connecting to RabbitMQ...")
             self.connect_rabbitmq()
-            logger.info("Connecting to MongoDB...")
             self.connect_mongodb()
-            logger.info("Both connections established. Starting event generation...")
+            logger.info("Starting event generation loop…")
 
             event_count = 0
             last_report = time.time()
 
             while True:
-                # Generate random event from random domain
-                import random
+                self._poll_config()
 
-                domain = random.choice(list(self.generators.keys()))
+                if self.config.paused:
+                    time.sleep(0.5)
+                    continue
+
+                domain    = self._pick_domain()
                 generator = self.generators[domain]
+                event     = generator.generate()
+                event     = self._apply_overrides(event)
 
-                # Generate event
-                event = generator.generate()
-
-                # Publish to RabbitMQ and save to MongoDB
-                published = self.publish_event(event, domain)
-                saved = self.save_event(event)
-
-                if published and saved:
+                if self.publish_event(event, domain) and self.save_event(event):
                     event_count += 1
-
-                    # Log progress every 1000 events
-                    if event_count % 1000 == 0:
+                    if event_count % 500 == 0:
                         elapsed = time.time() - last_report
-                        rate = 1000 / elapsed
+                        rate    = 500 / elapsed if elapsed else 0
                         logger.info(
-                            f"Published {event_count} events (@{rate:.2f} evt/sec)"
+                            "Published %d events  (%.1f evt/s | config=%d/s | scenario='%s')",
+                            event_count, rate, self.config.event_rate, self.config.scenario_name,
                         )
                         last_report = time.time()
 
-                # Rate limiting
-                time.sleep(1.0 / self.event_rate)
+                time.sleep(self.config.sleep_interval)
 
         except KeyboardInterrupt:
             logger.info("Simulator stopped by user")
         except Exception as e:
-            logger.error(f"Simulator error: {e}", exc_info=True)
+            logger.error("Fatal simulator error: %s", e, exc_info=True)
         finally:
             if self.connection:
-                self.connection.close()
-                logger.info("RabbitMQ connection closed")
+                try: self.connection.close()
+                except Exception: pass
             if self.mongo:
                 self.mongo.close()
-                logger.info("MongoDB connection closed")
 
 
 if __name__ == "__main__":
-    simulator = EventSimulator()
-    simulator.run()
+    EventSimulator().run()
