@@ -75,18 +75,30 @@ def get_event(event_id):
 @app.route("/api/events/complex", methods=["GET"])
 def list_complex_events():
     try:
-        limit  = min(int(request.args.get("limit", 100)), 500)
+        limit  = min(int(request.args.get("limit", 50)), 500)
         skip   = int(request.args.get("skip", 0))
         query  = {}
         if request.args.get("pattern_id"):  query["pattern_id"]  = request.args["pattern_id"]
         if request.args.get("alert_level"): query["alert_level"] = request.args["alert_level"]
 
+        # Optional time window: since=<minutes>. Default: last 60 minutes.
+        since_minutes = int(request.args.get("since", 60))
+        if since_minutes > 0:
+            cutoff     = datetime.utcnow() - timedelta(minutes=since_minutes)
+            cutoff_iso = cutoff.isoformat() + "Z"
+            query["$or"] = [
+                {"created_at": {"$gte": cutoff}},
+                {"timestamp":  {"$gte": cutoff_iso}},
+            ]
+
         events = list(db.complex_events.find(query).sort("timestamp", -1).skip(skip).limit(limit))
         for e in events:
             e["_id"] = str(e["_id"])
         count = db.complex_events.count_documents(query)
-        return jsonify({"events": events, "count": count, "limit": limit, "skip": skip}), 200
+        return jsonify({"events": events, "count": count, "limit": limit, "skip": skip,
+                        "since_minutes": since_minutes}), 200
     except Exception as e:
+        logger.error("Error listing complex events: %s", e)
         return jsonify({"error": str(e)}), 500
 
 

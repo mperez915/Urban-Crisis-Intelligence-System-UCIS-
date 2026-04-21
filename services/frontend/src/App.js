@@ -113,6 +113,7 @@ function App() {
   // filters — Alerts
   const [altPatternId,  setAltPatternId]  = useState('');
   const [altAlertLevel, setAltAlertLevel] = useState('');
+  const [altSince,      setAltSince]      = useState('60'); // minutes window
 
   // Pattern CRUD
   const [patternForm, setPatternForm] = useState(null);
@@ -143,7 +144,7 @@ function App() {
       const [evtRes, alertRes, statsRes, patternsRes, topRes, scenariosRes, simRes] =
         await Promise.all([
           axios.get(`${API_URL}/events?limit=${PAGE_SIZE}&skip=0`),
-          axios.get(`${API_URL}/events/complex?limit=${PAGE_SIZE}&skip=0`),
+          axios.get(`${API_URL}/events/complex?limit=${PAGE_SIZE}&skip=0&since=60`),
           axios.get(`${API_URL}/stats/events-per-minute`),
           axios.get(`${API_URL}/patterns`),
           axios.get(`${API_URL}/stats/top-alerts`),
@@ -190,6 +191,7 @@ function App() {
     const params = new URLSearchParams({ limit: PAGE_SIZE, skip });
     if (altPatternId)  params.set('pattern_id',  altPatternId);
     if (altAlertLevel) params.set('alert_level',  altAlertLevel);
+    if (altSince)      params.set('since',        altSince);
     const res = await axios.get(`${API_URL}/events/complex?${params}`);
     const fetched = res.data.events || [];
     if (skip === 0) {
@@ -203,7 +205,7 @@ function App() {
     }
     setComplexCount(res.data.count || 0);
     setComplexSkip(skip);
-  }, [altPatternId, altAlertLevel]);
+  }, [altPatternId, altAlertLevel, altSince]);
 
   const fetchPatterns = useCallback(async () => {
     const res = await axios.get(`${API_URL}/patterns`);
@@ -245,7 +247,7 @@ function App() {
   useEffect(() => { if (activeTab === 'events') fetchEvents(0).catch(() => {}); },
     [evtDomain, evtZone, evtSeverity]); // eslint-disable-line
   useEffect(() => { if (activeTab === 'alerts') fetchAlerts(0).catch(() => {}); },
-    [altPatternId, altAlertLevel]); // eslint-disable-line
+    [altPatternId, altAlertLevel, altSince]); // eslint-disable-line
 
   // ── Pattern CRUD ───────────────────────────────────────────────────────────
   const openNewPattern  = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); };
@@ -553,10 +555,13 @@ function App() {
 
             {/* Recent alerts */}
             <div className="card">
-              <h3>Recent Alerts <small style={{ fontSize: 12, fontWeight: 'normal', color: '#888' }}>— pushed via WebSocket</small></h3>
+              <h3>Recent Alerts <small style={{ fontSize: 12, fontWeight: 'normal', color: '#888' }}>— last hour</small></h3>
               {complexEvents.length > 0 ? (
                 <ul className="event-list">
-                  {complexEvents.slice(0, 5).map((alert, idx) => (
+                  {complexEvents.filter(a => {
+                    const t = new Date(a.timestamp);
+                    return !isNaN(t) && (Date.now() - t.getTime()) < 3600000;
+                  }).slice(0, 5).map((alert, idx) => (
                     <li key={idx} className={`event-item ${alert.alert_level}`}>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <strong>{alert.pattern_name || alert.pattern_id}</strong>
@@ -620,42 +625,76 @@ function App() {
         {/* ── ALERTS ──────────────────────────────────────────────────────── */}
         {activeTab === 'alerts' && (
           <div className="card">
+            {/* Header */}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h3 style={{ margin: 0 }}>Complex Events &amp; Alerts</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <h3 style={{ margin: 0 }}>
+                Complex Events &amp; Alerts
+                <small style={{ fontWeight: 'normal', fontSize: 12, color: '#888', marginLeft: 8 }}>
+                  {complexCount.toLocaleString()} in window · {complexEvents.length} loaded
+                </small>
+              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <WsIndicator connected={wsConnected} />
-                <small style={{ color: '#888' }}>{complexEvents.length} shown / {complexCount.toLocaleString()} total</small>
+                <button className="btn-secondary" style={{ fontSize: 12, padding: '4px 10px' }}
+                  onClick={() => setComplexEvents([])}>
+                  Clear session
+                </button>
               </div>
             </div>
+
+            {/* Filters */}
             <FilterBar>
-              <Sel value={altPatternId} onChange={setAltPatternId}
-                placeholder="All patterns"
-                options={[...new Set(complexEvents.map(e => e.pattern_id).filter(Boolean))]} />
-              <Sel value={altAlertLevel} onChange={setAltAlertLevel} placeholder="All levels" options={SEVERITIES} />
-              {(altPatternId || altAlertLevel) &&
-                <ClearBtn onClick={() => { setAltPatternId(''); setAltAlertLevel(''); }} />}
+              <Sel value={altSince} onChange={setAltSince} placeholder="Time window"
+                options={[
+                  { value: '15',  label: 'Last 15 min' },
+                  { value: '60',  label: 'Last hour' },
+                  { value: '360', label: 'Last 6 h' },
+                  { value: '0',   label: 'All time' },
+                ]} />
+              <Sel value={altAlertLevel} onChange={setAltAlertLevel} placeholder="All severities" options={SEVERITIES} />
+              <Sel value={altPatternId} onChange={setAltPatternId} placeholder="All patterns"
+                options={patterns.map(p => ({ value: p.pattern_id, label: p.name || p.pattern_id }))} />
+              {(altPatternId || altAlertLevel || altSince !== '60') &&
+                <ClearBtn onClick={() => { setAltPatternId(''); setAltAlertLevel(''); setAltSince('60'); }} />}
             </FilterBar>
+
+            {/* Compact table */}
             {complexEvents.length > 0 ? (
               <>
-                <ul className="event-list">
-                  {complexEvents
-                    .filter(e => (!altPatternId || e.pattern_id === altPatternId) && (!altAlertLevel || e.alert_level === altAlertLevel))
-                    .map((alert, idx) => (
-                      <li key={idx} className={`event-item ${alert.alert_level}`}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <strong>🚨 {alert.pattern_name || alert.pattern_id}</strong>
-                          <SeverityBadge level={alert.alert_level} />
-                        </div>
-                        <p style={{ fontSize: 13, margin: '4px 0' }}>{alert.description || 'Complex event detected'}</p>
-                        <p style={{ fontSize: 13, margin: '2px 0' }}>
-                          Zone: <strong>{alert.zone || '—'}</strong>
-                          &nbsp;|&nbsp; Pattern: <code style={{ fontSize: 11 }}>{alert.pattern_id}</code>
-                        </p>
-                        <small>{fmtTime(alert.timestamp)}</small>
-                      </li>
-                    ))}
-                </ul>
-                {complexEvents.length < complexCount && !altPatternId && !altAlertLevel && (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#f0f4f8', textAlign: 'left' }}>
+                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Severity</th>
+                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Pattern</th>
+                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Zone</th>
+                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Time</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {complexEvents.map((alert, idx) => (
+                        <tr key={idx} style={{ borderBottom: '1px solid #eee',
+                          backgroundColor: alert.alert_level === 'critical' ? '#fff5f5' :
+                                           alert.alert_level === 'high'     ? '#fff8f0' : 'white' }}>
+                          <td style={{ padding: '7px 10px' }}>
+                            <SeverityBadge level={alert.alert_level} />
+                          </td>
+                          <td style={{ padding: '7px 10px', maxWidth: 320 }}>
+                            <div style={{ fontWeight: 600, fontSize: 12 }}>{alert.pattern_name || alert.pattern_id}</div>
+                            {alert.description && (
+                              <div style={{ fontSize: 11, color: '#777', marginTop: 2 }}>{alert.description}</div>
+                            )}
+                          </td>
+                          <td style={{ padding: '7px 10px', fontSize: 12 }}>{alert.zone || '—'}</td>
+                          <td style={{ padding: '7px 10px', fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
+                            {fmtTime(alert.timestamp)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {complexEvents.length < complexCount && (
                   <div style={{ textAlign: 'center', marginTop: 12 }}>
                     <button className="btn-secondary"
                       onClick={() => fetchAlerts(complexSkip + PAGE_SIZE).catch(() => {})}>
@@ -665,7 +704,7 @@ function App() {
                 )}
               </>
             ) : (
-              <p style={{ color: '#888' }}>No alerts match the current filters</p>
+              <p style={{ color: '#888', padding: '20px 0' }}>No alerts in the selected time window</p>
             )}
           </div>
         )}
