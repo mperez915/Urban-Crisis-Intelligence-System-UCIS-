@@ -88,7 +88,6 @@ function App() {
   const [eventsSkip, setEventsSkip]     = useState(0);
   const [complexEvents, setComplexEvents] = useState([]);
   const [complexCount, setComplexCount] = useState(0);
-  const [complexSkip, setComplexSkip]   = useState(0);
   const [patterns, setPatterns]         = useState([]);
   const [stats, setStats]               = useState({});
   const [topAlerts, setTopAlerts]       = useState([]);
@@ -128,11 +127,8 @@ function App() {
     socketRef.current = socket;
     socket.on('connect',    () => setWsConnected(true));
     socket.on('disconnect', () => setWsConnected(false));
-    socket.on('complex_event', (event) => {
-      setComplexEvents(prev => {
-        const updated = [event, ...prev];
-        return updated.slice(0, 200);
-      });
+    socket.on('complex_event', () => {
+      // Just bump the count so the tab badge updates; grouped list refreshes on next poll
       setComplexCount(prev => prev + 1);
     });
     return () => socket.disconnect();
@@ -144,7 +140,7 @@ function App() {
       const [evtRes, alertRes, statsRes, patternsRes, topRes, scenariosRes, simRes] =
         await Promise.all([
           axios.get(`${API_URL}/events?limit=${PAGE_SIZE}&skip=0`),
-          axios.get(`${API_URL}/events/complex?limit=${PAGE_SIZE}&skip=0&since=60`),
+          axios.get(`${API_URL}/events/complex?grouped=true&since=60`),
           axios.get(`${API_URL}/stats/events-per-minute`),
           axios.get(`${API_URL}/patterns`),
           axios.get(`${API_URL}/stats/top-alerts`),
@@ -154,14 +150,8 @@ function App() {
       setEvents(evtRes.data.events || []);
       setEventsCount(evtRes.data.count || 0);
       setEventsSkip(0);
-      const fetched = alertRes.data.events || [];
-      setComplexEvents(prev => {
-        const ids = new Set(fetched.map(e => e._id).filter(Boolean));
-        const wsOnly = prev.filter(e => !ids.has(e._id));
-        return [...fetched, ...wsOnly].slice(0, 200);
-      });
+      setComplexEvents(alertRes.data.events || []);
       setComplexCount(alertRes.data.count || 0);
-      setComplexSkip(0);
       setStats(statsRes.data || {});
       setPatterns(patternsRes.data.patterns || []);
       setTopAlerts(topRes.data.data || []);
@@ -187,24 +177,14 @@ function App() {
     setEventsSkip(skip);
   }, [evtDomain, evtZone, evtSeverity]);
 
-  const fetchAlerts = useCallback(async (skip = 0) => {
-    const params = new URLSearchParams({ limit: PAGE_SIZE, skip });
+  const fetchAlerts = useCallback(async () => {
+    const params = new URLSearchParams({ grouped: 'true' });
     if (altPatternId)  params.set('pattern_id',  altPatternId);
     if (altAlertLevel) params.set('alert_level',  altAlertLevel);
     if (altSince)      params.set('since',        altSince);
     const res = await axios.get(`${API_URL}/events/complex?${params}`);
-    const fetched = res.data.events || [];
-    if (skip === 0) {
-      setComplexEvents(prev => {
-        const ids = new Set(fetched.map(e => e._id).filter(Boolean));
-        const wsOnly = prev.filter(e => !ids.has(e._id));
-        return [...fetched, ...wsOnly].slice(0, 200);
-      });
-    } else {
-      setComplexEvents(prev => [...prev, ...fetched]);
-    }
+    setComplexEvents(res.data.events || []);
     setComplexCount(res.data.count || 0);
-    setComplexSkip(skip);
   }, [altPatternId, altAlertLevel, altSince]);
 
   const fetchPatterns = useCallback(async () => {
@@ -630,7 +610,7 @@ function App() {
               <h3 style={{ margin: 0 }}>
                 Complex Events &amp; Alerts
                 <small style={{ fontWeight: 'normal', fontSize: 12, color: '#888', marginLeft: 8 }}>
-                  {complexCount.toLocaleString()} in window · {complexEvents.length} loaded
+                  {complexEvents.length} unique pattern–zone combinations in window
                 </small>
               </h3>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -658,51 +638,46 @@ function App() {
                 <ClearBtn onClick={() => { setAltPatternId(''); setAltAlertLevel(''); setAltSince('60'); }} />}
             </FilterBar>
 
-            {/* Compact table */}
+            {/* Grouped table — one row per pattern+zone combination */}
             {complexEvents.length > 0 ? (
-              <>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ backgroundColor: '#f0f4f8', textAlign: 'left' }}>
-                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Severity</th>
-                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Pattern</th>
-                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Zone</th>
-                        <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Time</th>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f0f4f8', textAlign: 'left' }}>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Severity</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Pattern</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Zone</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600, textAlign: 'right' }}>Triggers</th>
+                      <th style={{ padding: '8px 10px', borderBottom: '2px solid #ddd', fontWeight: 600 }}>Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {complexEvents.map((alert, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #eee',
+                        backgroundColor: alert.alert_level === 'critical' ? '#fff5f5' :
+                                         alert.alert_level === 'high'     ? '#fff8f0' : 'white' }}>
+                        <td style={{ padding: '7px 10px' }}>
+                          <SeverityBadge level={alert.alert_level} />
+                        </td>
+                        <td style={{ padding: '7px 10px', maxWidth: 280 }}>
+                          <div style={{ fontWeight: 600, fontSize: 12 }}>{alert.pattern_name || alert.pattern_id}</div>
+                          {alert.description && (
+                            <div style={{ fontSize: 11, color: '#777', marginTop: 2 }}>{alert.description}</div>
+                          )}
+                        </td>
+                        <td style={{ padding: '7px 10px', fontSize: 12 }}>{alert.zone || '—'}</td>
+                        <td style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700,
+                          color: alert.occurrences > 100 ? '#ff4444' : alert.occurrences > 10 ? '#ff9800' : '#333' }}>
+                          {(alert.occurrences || 1).toLocaleString()}
+                        </td>
+                        <td style={{ padding: '7px 10px', fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
+                          {fmtTime(alert.last_seen || alert.timestamp)}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {complexEvents.map((alert, idx) => (
-                        <tr key={idx} style={{ borderBottom: '1px solid #eee',
-                          backgroundColor: alert.alert_level === 'critical' ? '#fff5f5' :
-                                           alert.alert_level === 'high'     ? '#fff8f0' : 'white' }}>
-                          <td style={{ padding: '7px 10px' }}>
-                            <SeverityBadge level={alert.alert_level} />
-                          </td>
-                          <td style={{ padding: '7px 10px', maxWidth: 320 }}>
-                            <div style={{ fontWeight: 600, fontSize: 12 }}>{alert.pattern_name || alert.pattern_id}</div>
-                            {alert.description && (
-                              <div style={{ fontSize: 11, color: '#777', marginTop: 2 }}>{alert.description}</div>
-                            )}
-                          </td>
-                          <td style={{ padding: '7px 10px', fontSize: 12 }}>{alert.zone || '—'}</td>
-                          <td style={{ padding: '7px 10px', fontSize: 11, color: '#666', whiteSpace: 'nowrap' }}>
-                            {fmtTime(alert.timestamp)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {complexEvents.length < complexCount && (
-                  <div style={{ textAlign: 'center', marginTop: 12 }}>
-                    <button className="btn-secondary"
-                      onClick={() => fetchAlerts(complexSkip + PAGE_SIZE).catch(() => {})}>
-                      Load more ({complexCount - complexEvents.length} remaining)
-                    </button>
-                  </div>
-                )}
-              </>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
               <p style={{ color: '#888', padding: '20px 0' }}>No alerts in the selected time window</p>
             )}

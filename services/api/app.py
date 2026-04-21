@@ -74,29 +74,72 @@ def get_event(event_id):
 
 @app.route("/api/events/complex", methods=["GET"])
 def list_complex_events():
+    """
+    Returns complex events grouped by (pattern_id, zone) by default.
+    Each row shows: pattern_id, pattern_name, alert_level, zone, occurrences, last_seen.
+    Pass grouped=false to get raw individual events (paginated).
+    """
     try:
-        limit  = min(int(request.args.get("limit", 50)), 500)
-        skip   = int(request.args.get("skip", 0))
-        query  = {}
-        if request.args.get("pattern_id"):  query["pattern_id"]  = request.args["pattern_id"]
-        if request.args.get("alert_level"): query["alert_level"] = request.args["alert_level"]
-
-        # Optional time window: since=<minutes>. Default: last 60 minutes.
         since_minutes = int(request.args.get("since", 60))
+        pattern_id    = request.args.get("pattern_id")
+        alert_level   = request.args.get("alert_level")
+        grouped       = request.args.get("grouped", "true").lower() != "false"
+
+        # Build time-window match
+        match = {}
+        if pattern_id:  match["pattern_id"]  = pattern_id
+        if alert_level: match["alert_level"]  = alert_level
         if since_minutes > 0:
             cutoff     = datetime.utcnow() - timedelta(minutes=since_minutes)
             cutoff_iso = cutoff.isoformat() + "Z"
-            query["$or"] = [
+            match["$or"] = [
                 {"created_at": {"$gte": cutoff}},
                 {"timestamp":  {"$gte": cutoff_iso}},
             ]
 
-        events = list(db.complex_events.find(query).sort("timestamp", -1).skip(skip).limit(limit))
-        for e in events:
+        if grouped:
+            pipeline = [
+                {"$match": match},
+                {"$group": {
+                    "_id": {
+                        "pattern_id":   "$pattern_id",
+                        "pattern_name": "$pattern_name",
+                        "alert_level":  "$alert_level",
+                        "zone":         "$zone",
+                    },
+                    "occurrences": {"$sum": 1},
+                    "last_seen":   {"$max": "$timestamp"},
+                    "description": {"$first": "$description"},
+                }},
+                {"$sort": {"last_seen": -1, "occurrences": -1}},
+            ]
+            rows = list(db.complex_events.aggregate(pipeline))
+            events = [{
+                "pattern_id":   r["_id"]["pattern_id"],
+                "pattern_name": r["_id"].get("pattern_name") or r["_id"]["pattern_id"],
+                "alert_level":  r["_id"]["alert_level"],
+                "zone":         r["_id"].get("zone") or "—",
+                "occurrences":  r["occurrences"],
+                "last_seen":    r["last_seen"],
+                "description":  r.get("description", ""),
+            } for r in rows]
+            return jsonify({
+                "events": events,
+                "count":  len(events),
+                "grouped": True,
+                "since_minutes": since_minutes,
+            }), 200
+
+        # Raw mode (ungrouped) — for Load more
+        limit = min(int(request.args.get("limit", 50)), 500)
+        skip  = int(request.args.get("skip", 0))
+        raw   = list(db.complex_events.find(match).sort("timestamp", -1).skip(skip).limit(limit))
+        for e in raw:
             e["_id"] = str(e["_id"])
-        count = db.complex_events.count_documents(query)
-        return jsonify({"events": events, "count": count, "limit": limit, "skip": skip,
-                        "since_minutes": since_minutes}), 200
+        count = db.complex_events.count_documents(match)
+        return jsonify({"events": raw, "count": count, "limit": limit, "skip": skip,
+                        "grouped": False, "since_minutes": since_minutes}), 200
+
     except Exception as e:
         logger.error("Error listing complex events: %s", e)
         return jsonify({"error": str(e)}), 500
