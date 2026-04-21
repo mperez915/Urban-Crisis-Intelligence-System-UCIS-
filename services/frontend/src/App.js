@@ -1,12 +1,14 @@
 import axios from 'axios';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
     CartesianGrid, Line, LineChart,
     ResponsiveContainer, Tooltip, XAxis, YAxis
 } from 'recharts';
+import { io } from 'socket.io-client';
 import './index.css';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const WS_URL  = process.env.REACT_APP_WEBSOCKET_URL || 'http://localhost:8083';
 
 const EMPTY_PATTERN = {
   pattern_id: '', name: '', description: '',
@@ -18,12 +20,13 @@ const ALL_ZONES   = ['downtown', 'suburbs', 'industrial', 'residential', 'airpor
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [events, setEvents]             = useState([]);
+  const [events, setEvents]               = useState([]);
   const [complexEvents, setComplexEvents] = useState([]);
-  const [patterns, setPatterns]         = useState([]);
-  const [stats, setStats]               = useState({});
-  const [loading, setLoading]           = useState(false);
-  const [error, setError]               = useState(null);
+  const [patterns, setPatterns]           = useState([]);
+  const [stats, setStats]                 = useState({});
+  const [loading, setLoading]             = useState(false);
+  const [error, setError]                 = useState(null);
+  const [wsConnected, setWsConnected]     = useState(false);
 
   // Filters — Events tab
   const [evtDomain,   setEvtDomain]   = useState('');
@@ -35,11 +38,31 @@ function App() {
   const [altAlertLevel, setAltAlertLevel] = useState('');
 
   // Pattern CRUD
-  const [patternForm,  setPatternForm]  = useState(null);
-  const [formError,    setFormError]    = useState(null);
-  const [formLoading,  setFormLoading]  = useState(false);
+  const [patternForm, setPatternForm] = useState(null);
+  const [formError,   setFormError]   = useState(null);
+  const [formLoading, setFormLoading] = useState(false);
 
-  // Re-fetch when tab or filters change
+  const socketRef = useRef(null);
+
+  // ── WebSocket connection ────────────────────────────────────────────────────
+  useEffect(() => {
+    const socket = io(WS_URL, { transports: ['websocket', 'polling'] });
+    socketRef.current = socket;
+
+    socket.on('connect', () => setWsConnected(true));
+    socket.on('disconnect', () => setWsConnected(false));
+
+    socket.on('complex_event', (event) => {
+      setComplexEvents(prev => {
+        const updated = [event, ...prev];
+        return updated.slice(0, 100);
+      });
+    });
+
+    return () => socket.disconnect();
+  }, []);
+
+  // ── REST polling (events, stats, patterns — not alerts) ────────────────────
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 5000);
@@ -160,12 +183,26 @@ function App() {
     <button className="btn-secondary" style={{ padding: '6px 12px', fontSize: 12 }} onClick={onClick}>Clear</button>
   );
 
+  const WsIndicator = () => (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      fontSize: 12, color: wsConnected ? '#4caf50' : '#aaa',
+    }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%',
+        backgroundColor: wsConnected ? '#4caf50' : '#aaa',
+        display: 'inline-block',
+      }} />
+      {wsConnected ? 'Real-time connected' : 'Connecting…'}
+    </span>
+  );
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
       <div className="header">
         <h1>🚨 Urban Crisis Intelligence System (UCIS)</h1>
-        <p>Real-time Crisis Detection &amp; Monitoring Dashboard</p>
+        <p>Real-time Crisis Detection &amp; Monitoring Dashboard &nbsp;<WsIndicator /></p>
       </div>
 
       <div className="container">
@@ -224,7 +261,7 @@ function App() {
             )}
 
             <div className="card">
-              <h3>Recent Alerts</h3>
+              <h3>Recent Alerts <small style={{ fontSize: 12, fontWeight: 'normal', color: '#888' }}>— pushed via WebSocket</small></h3>
               {complexEvents.length > 0 ? (
                 <ul className="event-list">
                   {complexEvents.slice(0, 5).map((alert, idx) => (
@@ -289,7 +326,10 @@ function App() {
           <div className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <h3 style={{ margin: 0 }}>Complex Events &amp; Alerts</h3>
-              <small style={{ color: '#888' }}>{complexEvents.length} shown</small>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <WsIndicator />
+                <small style={{ color: '#888' }}>{complexEvents.length} shown</small>
+              </div>
             </div>
             <FilterBar>
               <Select value={altPatternId}  onChange={setAltPatternId}
@@ -301,7 +341,9 @@ function App() {
             </FilterBar>
             {complexEvents.length > 0 ? (
               <ul className="event-list">
-                {complexEvents.map((alert, idx) => (
+                {complexEvents
+                  .filter(e => (!altPatternId || e.pattern_id === altPatternId) && (!altAlertLevel || e.alert_level === altAlertLevel))
+                  .map((alert, idx) => (
                   <li key={idx} className={`event-item ${alert.alert_level}`}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <strong>🚨 {alert.pattern_name || alert.pattern_id}</strong>

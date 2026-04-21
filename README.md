@@ -17,7 +17,7 @@ Un sistema inteligente de análisis de eventos en tiempo real para detección y 
 
 ## Visión General
 
-UCIS es una plataforma de análisis de eventos complejos diseñada para detectar patrones críticos en datos de sensores IoT urbanos. El sistema procesa eventos de **5 dominios principales** en tiempo real:
+UCIS es una plataforma de análisis de eventos complejos diseñada para detectar patrones críticos en datos de sensores IoT urbanos. El sistema procesa eventos de **5 dominios principales** en tiempo real y entrega alertas al panel de control sin latencia mediante un canal **WebSocket dedicado** (Socket.IO):
 
 - **Climate** — Temperatura, tormentas, viento
 - **Traffic** — Congestión, accidentes, incidentes  
@@ -31,7 +31,7 @@ El sistema genera **~100 eventos/segundo** y detecta **patrones complejos** medi
 
 ## Arquitectura del Sistema
 
-UCIS implementa una arquitectura de **microservicios basada en eventos**, organizada en 6 capas que procesan datos en tiempo real con un flujo unidireccional asincrónico.
+UCIS implementa una arquitectura de **microservicios basada en eventos**, organizada en 7 capas que procesan datos en tiempo real con un flujo unidireccional asincrónico. Los eventos complejos detectados por el motor CEP se entregan al frontend en tiempo real a través de un **servidor WebSocket dedicado** (FastAPI + Socket.IO), eliminando el polling HTTP para las alertas críticas.
 
 ### Diagrama de Arquitectura (Capas)
 
@@ -127,12 +127,25 @@ UCIS implementa una arquitectura de **microservicios basada en eventos**, organi
                                    │ HTTP polling cada 5s / CRUD patrones
                                    ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  CAPA 6: VISUALIZACIÓN                                                    │
+│  CAPA 6: ENTREGA EN TIEMPO REAL                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │  WebSocket Server  (Python 3.11 + FastAPI + Socket.IO, Port 8083)   │  │
+│  │                                                                     │  │
+│  │  - Consume cola ucis.websocket.events (binding: events.complex.#)   │  │
+│  │  - Emite evento Socket.IO "complex_event" a todos los clientes      │  │
+│  │  - Reconexión automática ante fallo de RabbitMQ                     │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ Socket.IO push en tiempo real
+                                   ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│  CAPA 7: VISUALIZACIÓN                                                    │
 │  ┌─────────────────────────────────────────────────────────────────────┐  │
 │  │  React Dashboard  (React 18, Port 3000)                             │  │
 │  │                                                                     │  │
 │  │  Dashboard | Events | Alerts | Patterns                             │  │
-│  │  Visualiza eventos, alertas y estadísticas en tiempo real           │  │
+│  │  Alertas en tiempo real vía Socket.IO (sin polling)                 │  │
+│  │  Indicador de conexión WebSocket (punto verde/gris)                 │  │
 │  │  Permite crear / modificar / activar / desactivar / eliminar        │  │
 │  │  patrones → API → MongoDB                                           │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
@@ -232,7 +245,16 @@ Routing: complex.accident_emergency
 
                     ↓
 
-PASO 6: ALMACENAMIENTO
+PASO 6: STREAMING WEBSOCKET
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+El evento complejo también se publica al exchange ucis.complex:
+
+  Routing Key: events.complex.<pattern_id>
+  Cola: ucis.websocket.events  →  WebSocket Server
+  WebSocket Server emite evento Socket.IO "complex_event"
+  Frontend recibe el push sin polling
+
+PASO 7: ALMACENAMIENTO
 ━━━━━━━━━━━━━━━━━━━━━
 RabbitMQ enruta a MongoDB:
 
@@ -249,9 +271,9 @@ Both:
 
                     ↓
 
-PASO 7: EXPOSICIÓN (API REST)
+PASO 8: EXPOSICIÓN (API REST)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Frontend hace polling cada 5 segundos:
+Frontend hace polling cada 5 segundos para eventos crudos, estadísticas y patrones:
 
 GET /api/events
 → MongoDB.find({}, {sort: {timestamp: -1}}).limit(50)
@@ -263,7 +285,7 @@ GET /api/events/complex
 
                     ↓
 
-PASO 8: VISUALIZACIÓN
+PASO 9: VISUALIZACIÓN
 ━━━━━━━━━━━━━━━━━━━
 React Frontend actualiza Dashboard:
 
@@ -1174,7 +1196,37 @@ Opción 2: Horizontal (múltiples instancias)
 
 ---
 
-### 7. React Frontend Dashboard (CAPA 6: VISUALIZACIÓN)
+### 7. WebSocket Server (CAPA 6: ENTREGA EN TIEMPO REAL)
+**Ubicación**: `services/websocket/`
+**Responsabilidad**: Consumir eventos complejos de RabbitMQ y entregarlos al frontend vía Socket.IO sin que el cliente tenga que sondear
+
+**Flujo**:
+```
+CEP Engine
+    │ publica routing key: events.complex.<pattern_id>
+    ▼
+Exchange: ucis.complex
+    │ binding: events.complex.# → Queue: ucis.websocket.events
+    ▼
+WebSocket Server (pika consumer)
+    │ emite evento Socket.IO: "complex_event"
+    ▼
+Frontend React
+    socket.on('complex_event', event => setComplexEvents(...))
+```
+
+**Características**:
+- Conexión Socket.IO con soporte WebSocket y long-polling como fallback
+- Consumer pika con reconexión automática ante caída de RabbitMQ
+- CORS permisivo para desarrollo (restringir en producción)
+- Evento `GET /health` para health checks de Docker
+
+**Tecnología**: Python 3.11 + FastAPI + python-socketio + pika
+**Puerto**: 8083
+
+---
+
+### 8. React Frontend Dashboard (CAPA 7: VISUALIZACIÓN)
 **Ubicación**: `services/frontend/`  
 **Responsabilidad**: Interfaz web interactiva para monitoreo y gestión del sistema
 
@@ -1508,7 +1560,8 @@ docker-compose ps
 | Servicio | URL | Credenciales |
 |----------|-----|-------------|
 | **Frontend** | http://localhost:3000 | - |
-| **REST API** | http://localhost:3000/api (vía Nginx proxy → api:5000) | - |
+| **REST API** | http://localhost:5000/api | - |
+| **WebSocket Server** | http://localhost:8083/health | - |
 | **RabbitMQ Mgmt** | http://localhost:15672 | admin / admin123 |
 | **CEP Engine** | http://localhost:8081/health | - |
 | **Enricher** | http://localhost:8082/health | - |

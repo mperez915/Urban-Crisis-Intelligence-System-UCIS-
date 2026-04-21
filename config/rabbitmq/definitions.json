@@ -18,6 +18,14 @@
       "auto_delete": false,
       "exclusive": false,
       "type": "classic"
+    },
+    {
+      "name": "ucis.websocket.events",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "type": "classic"
     }
   ],
   "exchanges": [
@@ -55,6 +63,14 @@
       "source": "ucis.events",
       "vhost": "/",
       "routing_key": "events.#",
+      "arguments": {}
+    },
+    {
+      "destination": "ucis.websocket.events",
+      "destination_type": "queue",
+      "source": "ucis.complex",
+      "vhost": "/",
+      "routing_key": "events.complex.#",
       "arguments": {}
     }
   ],

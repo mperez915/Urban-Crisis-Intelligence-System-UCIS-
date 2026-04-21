@@ -1,8 +1,8 @@
 # Build stage
 FROM node:18-alpine AS builder
 
-ARG REACT_APP_API_URL=http://localhost:3000/api
-ARG REACT_APP_WEBSOCKET_URL=ws://localhost:3000
+ARG REACT_APP_API_URL=http://localhost:5001/api
+ARG REACT_APP_WEBSOCKET_URL=http://localhost:8083
 
 WORKDIR /app
 

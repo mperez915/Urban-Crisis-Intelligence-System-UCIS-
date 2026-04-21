@@ -43,6 +43,7 @@ xxxxx          mongo:7.0                Up
 xxxxx          ucis-simulator           Up
 xxxxx          ucis-cep-engine          Up
 xxxxx          ucis-enricher            Up
+xxxxx          ucis-websocket           Up
 xxxxx          ucis-api                 Up
 xxxxx          ucis-frontend            Up
 ```
@@ -53,6 +54,7 @@ xxxxx          ucis-frontend            Up
 |---------|-----|-------------|
 | **Frontend Dashboard** | http://localhost:3000 | - |
 | **REST API** | http://localhost:5000/api | - |
+| **WebSocket Server** | http://localhost:8083/health | - |
 | **RabbitMQ Management** | http://localhost:15672 | admin / admin123 |
 | **MongoDB** | localhost:27017 | admin / admin123 |
 
@@ -102,8 +104,16 @@ curl http://localhost:5000/health
 curl http://localhost:5000/api/events?limit=5
 ```
 
-### 7. **React Frontend** 🖥️
-Real-time dashboard for monitoring.
+### 7. **WebSocket Server** 🔌
+Pushes complex events to the frontend in real-time via Socket.IO.
+No HTTP polling needed for alerts — events arrive instantly.
+
+**Check it**: `curl http://localhost:8083/health`
+
+### 8. **React Frontend** 🖥️
+Real-time dashboard for monitoring. Alerts arrive via WebSocket push;
+events, stats and patterns still use REST polling every 5s.
+A green dot indicator shows the WebSocket connection status.
 
 **Check it**: http://localhost:3000
 
@@ -249,7 +259,9 @@ docker logs -f ucis-cep-engine | grep PATTERN
 
 ## 💡 Tips
 
-- **Auto-refresh Dashboard**: Frontend updates every 5 seconds
+- **Real-time Alerts**: Delivered instantly via WebSocket (Socket.IO) — no refresh needed
+- **Connection Indicator**: Green dot in header = WebSocket connected
+- **Auto-refresh Dashboard**: Events, stats and patterns update via REST every 5 seconds
 - **Check Health**: All services have `/health` endpoints
 - **Persistent Data**: MongoDB data survives `docker compose down`
 - **Clear All**: `docker compose down -v` (removes all data — patterns will be re-seeded automatically on next startup)
