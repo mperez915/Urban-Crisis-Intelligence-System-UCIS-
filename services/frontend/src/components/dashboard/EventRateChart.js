@@ -1,7 +1,7 @@
 import {
-  Area, AreaChart,
-  CartesianGrid,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+    Area, AreaChart,
+    CartesianGrid,
+    ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import SeverityBadge from '../common/SeverityBadge';
 

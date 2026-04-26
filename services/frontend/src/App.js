@@ -1,25 +1,27 @@
 import axios from 'axios';
+import {
+    AlertTriangle, BellRing, Clapperboard, LayoutDashboard, ListChecks, Settings,
+} from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import {
-  AlertTriangle, BellRing, Clapperboard, LayoutDashboard, ListChecks, Settings,
-} from 'lucide-react';
 import './index.css';
 
 import {
-  API_URL, WS_URL,
-  PAGE_SIZE, MAX_BUFFER_POINTS,
-  EMPTY_PATTERN, EMPTY_SCENARIO,
+    API_URL,
+    EMPTY_PATTERN, EMPTY_SCENARIO,
+    MAX_BUFFER_POINTS,
+    PAGE_SIZE,
+    WS_URL,
 } from './utils/constants';
 
+import AlertsTab from './components/alerts/AlertsTab';
 import WsIndicator from './components/common/WsIndicator';
-import Dashboard   from './components/dashboard/Dashboard';
-import EventsTab   from './components/events/EventsTab';
-import AlertsTab   from './components/alerts/AlertsTab';
-import PatternsTab from './components/patterns/PatternsTab';
+import Dashboard from './components/dashboard/Dashboard';
+import EventsTab from './components/events/EventsTab';
 import PatternModal from './components/patterns/PatternModal';
-import ScenariosTab from './components/scenarios/ScenariosTab';
+import PatternsTab from './components/patterns/PatternsTab';
 import ScenarioModal from './components/scenarios/ScenarioModal';
+import ScenariosTab from './components/scenarios/ScenariosTab';
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');

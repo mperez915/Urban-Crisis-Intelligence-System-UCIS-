@@ -1,6 +1,7 @@
 import {
-  Car, CloudSun, HeartPulse, Leaf, Users,
-  MapPin,
+    Car, CloudSun, HeartPulse, Leaf,
+    MapPin,
+    Users,
 } from 'lucide-react';
 
 const DOMAIN_ICONS = {

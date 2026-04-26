@@ -1,6 +1,6 @@
-import Sel from '../common/Sel';
 import { ALL_DOMAINS, ALL_ZONES, SEVERITIES } from '../../utils/constants';
 import { DomainIcon } from '../../utils/icons';
+import Sel from '../common/Sel';
 
 const ScenarioModal = ({
   scenarioForm, setScenarioForm,

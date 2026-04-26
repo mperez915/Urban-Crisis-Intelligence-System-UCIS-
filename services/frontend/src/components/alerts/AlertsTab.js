@@ -1,10 +1,10 @@
-import FilterBar from '../common/FilterBar';
-import Sel from '../common/Sel';
-import ClearBtn from '../common/ClearBtn';
-import WsIndicator from '../common/WsIndicator';
-import SeverityBadge from '../common/SeverityBadge';
 import { SEVERITIES } from '../../utils/constants';
 import { fmtTime } from '../../utils/format';
+import ClearBtn from '../common/ClearBtn';
+import FilterBar from '../common/FilterBar';
+import Sel from '../common/Sel';
+import SeverityBadge from '../common/SeverityBadge';
+import WsIndicator from '../common/WsIndicator';
 
 const TIME_WINDOW_OPTIONS = [
   { value: '15',  label: 'Last 15 min' },

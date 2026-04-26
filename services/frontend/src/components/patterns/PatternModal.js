@@ -1,6 +1,6 @@
+import { Braces, FileText, Info } from 'lucide-react';
 import { ALL_DOMAINS, SEVERITIES } from '../../utils/constants';
 import { DomainIcon } from '../../utils/icons';
-import { Braces, FileText, Info } from 'lucide-react';
 
 const PatternModal = ({
   patternForm, jsonMode, jsonInput,

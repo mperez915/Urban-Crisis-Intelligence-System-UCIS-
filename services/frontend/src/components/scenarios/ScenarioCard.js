@@ -1,7 +1,7 @@
-import SeverityBadge from '../common/SeverityBadge';
+import { CheckCircle2, Copy, MapPin, Pencil, Play, Trash2, Zap } from 'lucide-react';
 import { ALL_DOMAINS } from '../../utils/constants';
 import { DomainIcon } from '../../utils/icons';
-import { CheckCircle2, Copy, MapPin, Pencil, Play, Trash2, Zap } from 'lucide-react';
+import SeverityBadge from '../common/SeverityBadge';
 
 const ScenarioCard = ({ scenario: s, isActive, onActivate, onClone, onEdit, onDelete }) => (
   <div style={{ marginBottom: 10, padding: 16, borderRadius: 6,

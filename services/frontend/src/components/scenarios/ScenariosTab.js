@@ -1,6 +1,6 @@
 import { Package, Pencil, Plus, Radio } from 'lucide-react';
-import SimulatorControls from './SimulatorControls';
 import ScenarioCard from './ScenarioCard';
+import SimulatorControls from './SimulatorControls';
 
 const ScenariosTab = ({
   simConfig, setSimConfig, patchSimConfig,

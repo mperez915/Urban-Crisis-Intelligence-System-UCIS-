@@ -1,6 +1,6 @@
 import { Pause, Play } from 'lucide-react';
-import Sel from '../common/Sel';
 import { ALL_ZONES, SEVERITIES } from '../../utils/constants';
+import Sel from '../common/Sel';
 
 const SimulatorControls = ({ simConfig, setSimConfig, patchSimConfig, activeScenarioId }) => {
   if (!simConfig) return null;

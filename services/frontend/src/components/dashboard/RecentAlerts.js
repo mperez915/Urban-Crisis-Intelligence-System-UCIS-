@@ -1,5 +1,5 @@
-import SeverityBadge from '../common/SeverityBadge';
 import { fmtTime } from '../../utils/format';
+import SeverityBadge from '../common/SeverityBadge';
 
 const RecentAlerts = ({ complexEvents }) => (
   <div className="card">

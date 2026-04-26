@@ -1,9 +1,9 @@
-import KpiGrid from './KpiGrid';
-import SimulatorStrip from './SimulatorStrip';
 import EventRateChart from './EventRateChart';
-import PatternTriggerTable from './PatternTriggerTable';
 import EventsByDomainZone from './EventsByDomainZone';
+import KpiGrid from './KpiGrid';
+import PatternTriggerTable from './PatternTriggerTable';
 import RecentAlerts from './RecentAlerts';
+import SimulatorStrip from './SimulatorStrip';
 
 const Dashboard = ({
   eventsCount, criticalAlerts, complexEvents, patterns, events,

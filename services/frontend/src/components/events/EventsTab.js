@@ -1,10 +1,10 @@
-import FilterBar from '../common/FilterBar';
-import Sel from '../common/Sel';
-import ClearBtn from '../common/ClearBtn';
-import SeverityBadge from '../common/SeverityBadge';
-import { ALL_DOMAINS, ALL_ZONES, SEVERITIES, PAGE_SIZE } from '../../utils/constants';
+import { ALL_DOMAINS, ALL_ZONES, PAGE_SIZE, SEVERITIES } from '../../utils/constants';
 import { fmtTime } from '../../utils/format';
 import { DomainIcon } from '../../utils/icons';
+import ClearBtn from '../common/ClearBtn';
+import FilterBar from '../common/FilterBar';
+import Sel from '../common/Sel';
+import SeverityBadge from '../common/SeverityBadge';
 
 const EventsTab = ({
   events, eventsCount, eventsSkip,
