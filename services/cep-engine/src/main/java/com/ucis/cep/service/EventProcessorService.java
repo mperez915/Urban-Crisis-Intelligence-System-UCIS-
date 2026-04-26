@@ -63,9 +63,6 @@ public class EventProcessorService {
             // Flatten enrichment.zone_context fields into a typed sub-map that Esper can navigate
             normalizeEnrichment(event);
 
-            // Check if patterns changed in MongoDB before processing this event
-            patternService.syncIfNeeded();
-
             epRuntime.getEventService().sendEventMap(event, eventType);
 
             long count = processedCount.incrementAndGet();

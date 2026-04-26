@@ -85,7 +85,13 @@ def _consume_loop():
         except json.JSONDecodeError:
             payload = {"raw": body.decode(errors="replace")}
 
-        log.debug("Complex event received: %s", payload.get("pattern_id", "?"))
+        log.info(
+            "📡 COMPLEX EVENT pattern=%s severity=%s zone=%s sources=%d",
+            payload.get("pattern_id", "?"),
+            payload.get("alert_level", payload.get("severity", "?")),
+            payload.get("zone", payload.get("data", {}).get("zone", "?")),
+            len(payload.get("source_events", [])),
+        )
 
         asyncio.run_coroutine_threadsafe(
             sio.emit("complex_event", payload),

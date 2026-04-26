@@ -1,8 +1,9 @@
 import axios from 'axios';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  CartesianGrid, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+    Area, AreaChart,
+    CartesianGrid,
+    ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { io } from 'socket.io-client';
 import './index.css';
@@ -70,10 +71,10 @@ const WsIndicator = ({ connected }) => (
   </span>
 );
 
-const SeverityBadge = ({ level, style = {} }) => (
+const SeverityBadge = ({ level, children, style = {} }) => (
   <span style={{ padding: '2px 8px', borderRadius: 4, fontSize: 11,
     backgroundColor: getSeverityColor(level), color: 'white', ...style }}>
-    {level}
+    {children ?? level}
   </span>
 );
 
@@ -118,6 +119,19 @@ function App() {
   const [patternForm, setPatternForm] = useState(null);
   const [formError,   setFormError]   = useState(null);
   const [formLoading, setFormLoading] = useState(false);
+  const [jsonMode, setJsonMode] = useState(false);
+  const [jsonInput, setJsonInput] = useState('');
+
+  // Chart granularity (user-controlled tabs, not auto-switched)
+  const [chartGranularity, setChartGranularity] = useState('10s');
+  // Rolling buffer per granularity — points accumulate across polls (queue-like).
+  // Keys are bucket_ms (epoch ms of bucket start). New polls merge in only the
+  // new/updated buckets instead of replacing the whole series, so points persist
+  // even after the backend window stops returning them.
+  const [chartBuffers, setChartBuffers] = useState({ '10s': [], '1m': [], '5m': [] });
+
+  // Cap how many buckets we keep client-side per granularity to avoid unbounded memory.
+  const MAX_BUFFER_POINTS = 600;
 
   const socketRef = useRef(null);
 
@@ -141,7 +155,7 @@ function App() {
         await Promise.all([
           axios.get(`${API_URL}/events?limit=${PAGE_SIZE}&skip=0`),
           axios.get(`${API_URL}/events/complex?grouped=true&since=60`),
-          axios.get(`${API_URL}/stats/events-per-minute`),
+          axios.get(`${API_URL}/stats/events-per-minute?granularity=${chartGranularity}`),
           axios.get(`${API_URL}/patterns`),
           axios.get(`${API_URL}/stats/top-alerts`),
           axios.get(`${API_URL}/scenarios`),
@@ -153,6 +167,21 @@ function App() {
       setComplexEvents(alertRes.data.events || []);
       setComplexCount(alertRes.data.count || 0);
       setStats(statsRes.data || {});
+      // Merge incoming buckets into the rolling buffer for this granularity
+      // (only new buckets append; in-progress bucket gets its count updated).
+      const incoming = statsRes.data?.data || [];
+      const grain = statsRes.data?.granularity || chartGranularity;
+      setChartBuffers(prev => {
+        const existing = prev[grain] || [];
+        const map = new Map(existing.map(p => [p.bucket_ms, p]));
+        for (const point of incoming) {
+          if (point.bucket_ms != null) map.set(point.bucket_ms, point);
+        }
+        const merged = Array.from(map.values())
+          .sort((a, b) => a.bucket_ms - b.bucket_ms)
+          .slice(-MAX_BUFFER_POINTS);
+        return { ...prev, [grain]: merged };
+      });
       setPatterns(patternsRes.data.patterns || []);
       setTopAlerts(topRes.data.data || []);
       setScenarios(scenariosRes.data.scenarios || []);
@@ -160,7 +189,7 @@ function App() {
     } catch (err) {
       setError(err.message);
     }
-  }, []);
+  }, [chartGranularity]);
 
   const fetchEvents = useCallback(async (skip = 0) => {
     const params = new URLSearchParams({ limit: PAGE_SIZE, skip });
@@ -230,9 +259,10 @@ function App() {
     [altPatternId, altAlertLevel, altSince]); // eslint-disable-line
 
   // ── Pattern CRUD ───────────────────────────────────────────────────────────
-  const openNewPattern  = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); };
-  const openEditPattern = (p) => { setPatternForm({ ...p, input_domains: Array.isArray(p.input_domains) ? p.input_domains : [] }); setFormError(null); };
-  const closeForm       = () => { setPatternForm(null); setFormError(null); };
+  const openNewPattern  = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); setJsonMode(false); setJsonInput(''); };
+  const openNewPatternJSON = () => { setPatternForm({ ...EMPTY_PATTERN }); setFormError(null); setJsonMode(true); setJsonInput(''); };
+  const openEditPattern = (p) => { setPatternForm({ ...p, input_domains: Array.isArray(p.input_domains) ? p.input_domains : [] }); setFormError(null); setJsonMode(false); setJsonInput(''); };
+  const closeForm       = () => { setPatternForm(null); setFormError(null); setJsonMode(false); setJsonInput(''); };
   const handleFormChange = (f, v) => setPatternForm(prev => ({ ...prev, [f]: v }));
   const toggleDomain    = (d) => setPatternForm(prev => ({
     ...prev,
@@ -241,17 +271,53 @@ function App() {
       : [...prev.input_domains, d],
   }));
 
+  const toggleJsonMode = () => {
+    if (!jsonMode) {
+      // Switching to JSON mode: export current form to JSON
+      setJsonInput(JSON.stringify(patternForm, null, 2));
+    } else {
+      // Switching to Form mode: parse JSON back
+      try {
+        const parsed = JSON.parse(jsonInput);
+        setPatternForm({
+          ...EMPTY_PATTERN,
+          ...parsed,
+          input_domains: Array.isArray(parsed.input_domains) ? parsed.input_domains : [],
+        });
+        setFormError(null);
+      } catch (err) {
+        setFormError('Invalid JSON: ' + err.message);
+        return;
+      }
+    }
+    setJsonMode(!jsonMode);
+  };
+
   const savePattern = async () => {
     setFormError(null);
-    if (!patternForm.pattern_id.trim()) { setFormError('pattern_id is required'); return; }
-    if (!patternForm.epl_rule.trim())   { setFormError('EPL rule is required');    return; }
+    
+    let dataToSave = patternForm;
+    
+    // If in JSON mode, parse the JSON first
+    if (jsonMode) {
+      try {
+        dataToSave = JSON.parse(jsonInput);
+      } catch (err) {
+        setFormError('Invalid JSON: ' + err.message);
+        return;
+      }
+    }
+    
+    if (!dataToSave.pattern_id?.trim()) { setFormError('pattern_id is required'); return; }
+    if (!dataToSave.epl_rule?.trim())   { setFormError('EPL rule is required');    return; }
+    
     setFormLoading(true);
     try {
-      if (!patternForm._id) {
-        await axios.post(`${API_URL}/patterns`, patternForm);
+      if (!patternForm._id && !dataToSave._id) {
+        await axios.post(`${API_URL}/patterns`, dataToSave);
       } else {
-        const { _id, ...data } = patternForm;
-        await axios.put(`${API_URL}/patterns/${patternForm.pattern_id}`, data);
+        const { _id, ...data } = dataToSave;
+        await axios.put(`${API_URL}/patterns/${dataToSave.pattern_id}`, data);
       }
       closeForm();
       fetchPatterns();
@@ -429,29 +495,109 @@ function App() {
               </div>
             )}
 
-            {/* Events rate chart — adapts to 10s or 1m granularity */}
+            {/* Events rate chart — stacked area by severity, with summary KPIs */}
             <div className="card">
-              <h3>{stats.label || 'Event Rate'}</h3>
-              {stats.data && stats.data.length > 1 ? (
-                <div className="chart-container">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={stats.data}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="_id" tick={{ fontSize: 10 }} interval="preserveStartEnd" />
-                      <YAxis allowDecimals={false} />
-                      <Tooltip formatter={val => [val, 'Events']} />
-                      <Line type="monotone" dataKey="count" stroke="#1a3a52"
-                        dot={stats.data.length < 30} strokeWidth={2} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              ) : (
-                <p style={{ color: '#888', padding: '20px 0' }}>
-                  {stats.data
-                    ? 'Not enough data points yet — let the simulator run for a few seconds.'
-                    : 'Loading chart data…'}
-                </p>
-              )}
+              {(() => {
+                const chartData = chartBuffers[chartGranularity] || [];
+                const counts = chartData.map(d => d.count || 0);
+                const total  = counts.reduce((a, b) => a + b, 0);
+                const peak   = counts.length ? Math.max(...counts) : 0;
+                const avg    = counts.length ? (total / counts.length).toFixed(1) : '0';
+                const sevTotals = ['critical', 'high', 'medium', 'low'].map(s => ({
+                  sev: s,
+                  n: chartData.reduce((acc, d) => acc + (d[s] || 0), 0),
+                }));
+                const unitWord = chartGranularity === '10s' ? '/10 s'
+                              : chartGranularity === '5m'  ? '/5 min' : '/min';
+                const yWidth = peak >= 10000 ? 60 : peak >= 1000 ? 52 : peak >= 100 ? 40 : 32;
+                const fmtAxis = v => v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k` : v;
+                return (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between',
+                      alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 8 }}>
+                      <h3 style={{ margin: 0 }}>{stats.label || 'Event Rate'}</h3>
+                      <div style={{ display: 'inline-flex', border: '1px solid #ddd',
+                        borderRadius: 6, overflow: 'hidden', fontSize: 12 }}>
+                        {[
+                          { id: '10s', label: '10 s buckets' },
+                          { id: '1m',  label: '1 min buckets' },
+                          { id: '5m',  label: '5 min buckets' },
+                        ].map(opt => (
+                          <button key={opt.id}
+                            onClick={() => setChartGranularity(opt.id)}
+                            style={{
+                              padding: '6px 12px',
+                              border: 'none',
+                              cursor: 'pointer',
+                              backgroundColor: chartGranularity === opt.id ? '#1a3a52' : 'white',
+                              color: chartGranularity === opt.id ? 'white' : '#333',
+                              fontWeight: chartGranularity === opt.id ? 600 : 400,
+                            }}>{opt.label}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {chartData.length > 0 && (
+                      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#444',
+                        alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+                        <span><strong>Buffered points:</strong> {chartData.length}</span>
+                        <span><strong>Total:</strong> {total.toLocaleString()}</span>
+                        <span><strong>Peak:</strong> {peak.toLocaleString()} {unitWord}</span>
+                        <span><strong>Avg:</strong> {avg} {unitWord}</span>
+                        <span style={{ display: 'inline-flex', gap: 6 }}>
+                          {sevTotals.filter(s => s.n > 0).map(s => (
+                            <SeverityBadge key={s.sev} level={s.sev}
+                              style={{ fontSize: 10 }}>{s.sev}: {s.n}</SeverityBadge>
+                          ))}
+                        </span>
+                      </div>
+                    )}
+                    {chartData.length > 1 ? (
+                      <div className="chart-container">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart data={chartData}
+                            margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                            <defs>
+                              {[
+                                ['gradLow',      '#4caf50'],
+                                ['gradMedium',   '#ffc107'],
+                                ['gradHigh',     '#ff9800'],
+                                ['gradCritical', '#ff4444'],
+                              ].map(([id, color]) => (
+                                <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%"  stopColor={color} stopOpacity={0.85} />
+                                  <stop offset="95%" stopColor={color} stopOpacity={0.35} />
+                                </linearGradient>
+                              ))}
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                            <XAxis dataKey="_id" tick={{ fontSize: 10 }}
+                              interval="preserveStartEnd" minTickGap={50} />
+                            <YAxis allowDecimals={false} tick={{ fontSize: 11 }}
+                              width={yWidth} domain={[0, 'auto']}
+                              tickFormatter={fmtAxis} />
+                            <Tooltip
+                              contentStyle={{ fontSize: 12, borderRadius: 4 }}
+                              labelFormatter={l => `Time: ${l}`}
+                              formatter={(val, name) => [val, name]} />
+                            <Area type="monotone" dataKey="low"      stackId="1" isAnimationActive={false}
+                              stroke="#4caf50" fill="url(#gradLow)"      strokeWidth={1} name="low" />
+                            <Area type="monotone" dataKey="medium"   stackId="1" isAnimationActive={false}
+                              stroke="#ffc107" fill="url(#gradMedium)"   strokeWidth={1} name="medium" />
+                            <Area type="monotone" dataKey="high"     stackId="1" isAnimationActive={false}
+                              stroke="#ff9800" fill="url(#gradHigh)"     strokeWidth={1} name="high" />
+                            <Area type="monotone" dataKey="critical" stackId="1" isAnimationActive={false}
+                              stroke="#ff4444" fill="url(#gradCritical)" strokeWidth={1} name="critical" />
+                          </AreaChart>
+                        </ResponsiveContainer>
+                      </div>
+                    ) : (
+                      <p style={{ color: '#888', padding: '20px 0' }}>
+                        Collecting data points… they will accumulate here as the simulator runs.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Pattern triggers table */}
@@ -690,7 +836,14 @@ function App() {
             <div className="card" style={{ display: 'flex', justifyContent: 'space-between',
               alignItems: 'center', padding: '12px 20px' }}>
               <h3 style={{ margin: 0 }}>CEP Patterns</h3>
-              <button className="btn-primary" onClick={openNewPattern}>+ New Pattern</button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn-secondary" onClick={openNewPatternJSON}>
+                  📝 New Pattern (JSON)
+                </button>
+                <button className="btn-primary" onClick={openNewPattern}>
+                  + New Pattern
+                </button>
+              </div>
             </div>
 
             {patterns.length > 0 ? patterns.map((pattern, idx) => (
@@ -901,52 +1054,85 @@ function App() {
             display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
             <div style={{ background: 'white', borderRadius: 8, padding: 24,
               width: '90%', maxWidth: 640, maxHeight: '90vh', overflowY: 'auto' }}>
-              <h3 style={{ marginTop: 0 }}>{patternForm._id ? 'Edit Pattern' : 'New Pattern'}</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ margin: 0 }}>{patternForm._id ? 'Edit Pattern' : 'New Pattern'}</h3>
+                <button 
+                  className="btn-secondary" 
+                  style={{ padding: '4px 12px', fontSize: 12 }}
+                  onClick={toggleJsonMode}
+                  disabled={formLoading}>
+                  {jsonMode ? '📝 Form Mode' : '{ } JSON Mode'}
+                </button>
+              </div>
+              
               {formError && <div className="error" style={{ marginBottom: 12 }}>{formError}</div>}
 
-              <label className="form-label">Pattern ID *</label>
-              <input className="form-input" value={patternForm.pattern_id}
-                onChange={e => handleFormChange('pattern_id', e.target.value)}
-                disabled={!!patternForm._id} placeholder="e.g. high_traffic_congestion" />
+              {jsonMode ? (
+                /* JSON Mode */
+                <>
+                  <div style={{ marginBottom: 12, padding: 12, backgroundColor: '#e3f2fd', 
+                    borderRadius: 4, fontSize: 13, color: '#1565c0' }}>
+                    <strong>📝 JSON Mode:</strong> Paste your complete pattern JSON here. 
+                    Ideal for complex enriched patterns with advanced EPL rules.
+                  </div>
+                  
+                  <label className="form-label">Pattern JSON *</label>
+                  <textarea 
+                    className="form-input" 
+                    rows={20} 
+                    value={jsonInput}
+                    onChange={e => setJsonInput(e.target.value)}
+                    placeholder={`{\n  "pattern_id": "my_complex_pattern",\n  "name": "Complex Pattern Name",\n  "description": "Pattern description",\n  "epl_rule": "SELECT ... FROM ...",\n  "severity": "high",\n  "enabled": true,\n  "input_domains": ["traffic", "health"],\n  "uses_enrichment": true,\n  "enrichment_fields": ["zone_context.risk_level"]\n}`}
+                    style={{ fontFamily: 'monospace', fontSize: 11 }} />
+                </>
+              ) : (
+                /* Form Mode */
+                <>
+                  <label className="form-label">Pattern ID *</label>
+                  <input className="form-input" value={patternForm.pattern_id}
+                    onChange={e => handleFormChange('pattern_id', e.target.value)}
+                    disabled={!!patternForm._id} placeholder="e.g. high_traffic_congestion" />
 
-              <label className="form-label">Name</label>
-              <input className="form-input" value={patternForm.name}
-                onChange={e => handleFormChange('name', e.target.value)} placeholder="Human-readable name" />
+                  <label className="form-label">Name</label>
+                  <input className="form-input" value={patternForm.name}
+                    onChange={e => handleFormChange('name', e.target.value)} placeholder="Human-readable name" />
 
-              <label className="form-label">Description</label>
-              <textarea className="form-input" rows={2} value={patternForm.description}
-                onChange={e => handleFormChange('description', e.target.value)}
-                placeholder="What does this pattern detect?" />
+                  <label className="form-label">Description</label>
+                  <textarea className="form-input" rows={2} value={patternForm.description}
+                    onChange={e => handleFormChange('description', e.target.value)}
+                    placeholder="What does this pattern detect?" />
 
-              <label className="form-label">EPL Rule *</label>
-              <textarea className="form-input" rows={5} value={patternForm.epl_rule}
-                onChange={e => handleFormChange('epl_rule', e.target.value)}
-                placeholder="SELECT ... FROM TrafficEvent(...).win:time(5 min) ..."
-                style={{ fontFamily: 'monospace', fontSize: 12 }} />
+                  <label className="form-label">EPL Rule *</label>
+                  <textarea className="form-input" rows={5} value={patternForm.epl_rule}
+                    onChange={e => handleFormChange('epl_rule', e.target.value)}
+                    placeholder="SELECT ... FROM TrafficEvent(...).win:time(5 min) ..."
+                    style={{ fontFamily: 'monospace', fontSize: 12 }} />
 
-              <label className="form-label">Severity</label>
-              <select className="form-input" value={patternForm.severity}
-                onChange={e => handleFormChange('severity', e.target.value)}>
-                {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
+                  <label className="form-label">Severity</label>
+                  <select className="form-input" value={patternForm.severity}
+                    onChange={e => handleFormChange('severity', e.target.value)}>
+                    {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
 
-              <label className="form-label">Input Domains</label>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-                {ALL_DOMAINS.map(domain => (
-                  <label key={domain} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                    <input type="checkbox"
-                      checked={patternForm.input_domains.includes(domain)}
-                      onChange={() => toggleDomain(domain)} />
-                    {getDomainIcon(domain)} {domain}
+                  <label className="form-label">Input Domains</label>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                    {ALL_DOMAINS.map(domain => (
+                      <label key={domain} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                        <input type="checkbox"
+                          checked={patternForm.input_domains.includes(domain)}
+                          onChange={() => toggleDomain(domain)} />
+                        {getDomainIcon(domain)} {domain}
+                      </label>
+                    ))}
+                  </div>
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={patternForm.enabled}
+                      onChange={e => handleFormChange('enabled', e.target.checked)} />
+                    Enabled
                   </label>
-                ))}
-              </div>
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
-                <input type="checkbox" checked={patternForm.enabled}
-                  onChange={e => handleFormChange('enabled', e.target.checked)} />
-                Enabled
-              </label>
+                </>
+              )}
 
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button className="btn-secondary" onClick={closeForm} disabled={formLoading}>Cancel</button>

@@ -9,6 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 
+# Build marker: regenerated whenever the COPY above invalidates the layer cache
+# (i.e. app.py changed). Used by app.py to detect a fresh build and wipe
+# transient MongoDB collections before re-seeding from the config JSON files.
+RUN date +%s%N > /app/.build_id
+
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=5 \

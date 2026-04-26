@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime
 from typing import Any, Dict
 
@@ -164,6 +166,11 @@ class EventEnricher:
         self.channel = None
         self.mongo = None
 
+        # Pause state - polled from MongoDB to drop events when simulator is paused
+        self._paused = False
+        self._last_pause_check = 0.0
+        self._pause_check_interval = 1.0  # seconds
+
         self.context_provider = ContextProvider()
 
         logger.info("Event Enricher initialized")
@@ -263,8 +270,37 @@ class EventEnricher:
     def process_event(self, ch, method, properties, body):
         """RabbitMQ message callback"""
         try:
+            # Check if simulator is paused (poll MongoDB periodically)
+            now = time.time()
+            if now - self._last_pause_check >= self._pause_check_interval:
+                self._last_pause_check = now
+                try:
+                    cfg = self.mongo.ucis_db.simulator_config.find_one({"_id": "main"}) or {}
+                    new_paused = bool(cfg.get("paused", False))
+                    if new_paused != self._paused:
+                        self._paused = new_paused
+                        if new_paused:
+                            logger.info("⏸️  ENRICHER PAUSED - dropping incoming events")
+                        else:
+                            logger.info("▶️  ENRICHER RESUMED - processing events")
+                except Exception as exc:
+                    logger.warning("Pause state poll failed: %s", exc)
+
             event = json.loads(body)
-            logger.debug(f"Received event: {event.get('id')}")
+
+            # If paused, drop the event (don't enrich, don't forward)
+            if self._paused:
+                logger.debug("Dropped event (paused): %s", event.get("id", "?"))
+                return
+
+            logger.info(
+                "← RECEIVED [%s/%s] id=%s zone=%s severity=%s",
+                event.get("domain", "?"),
+                event.get("type", "?"),
+                event.get("id", "?")[:8],
+                event.get("zone", "?"),
+                event.get("severity", "?"),
+            )
 
             # Enrich event
             enriched_event = self.enrich_event(event)
@@ -283,7 +319,12 @@ class EventEnricher:
                 ),
             )
 
-            logger.debug(f"Published enriched event: {routing_key}")
+            logger.info(
+                "→ ENRICHED [%s] id=%s zone=%s",
+                routing_key,
+                event.get("id", "?")[:8],
+                event.get("zone", "?"),
+            )
 
         except Exception as e:
             logger.error(f"Error processing event: {e}")

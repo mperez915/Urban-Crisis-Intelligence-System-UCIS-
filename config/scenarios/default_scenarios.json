@@ -1,0 +1,82 @@
+[
+  {
+    "scenario_id": "traffic_congestion_surge",
+    "name": "HIGH: Citywide Traffic Congestion Surge",
+    "description": "High-severity traffic events distributed across ALL 5 zones.",
+    "event_rate": 8,
+    "force_severity": "high",
+    "force_zone": null,
+    "domain_weights": {
+      "traffic": 10,
+      "climate": 1,
+      "health": 1,
+      "environment": 1,
+      "population": 1
+    },
+    "for_pattern": "traffic_congestion_hotspot"
+  },
+  {
+    "scenario_id": "cascading_multi_zone_crisis",
+    "name": "CRITICAL: Cascading Multi-Zone Crisis",
+    "description": "Citywide critical storms, accidents and health emergencies across all zones.",
+    "event_rate": 12,
+    "force_severity": "critical",
+    "force_zone": null,
+    "domain_weights": {
+      "traffic": 5,
+      "climate": 5,
+      "health": 5,
+      "environment": 1,
+      "population": 1
+    },
+    "for_pattern": "cascading_urban_crisis"
+  },
+  {
+    "scenario_id": "air_quality_drift",
+    "name": "MEDIUM: Citywide Air Quality Drift",
+    "description": "Moderate air-quality readings across all zones.",
+    "event_rate": 7,
+    "force_severity": "medium",
+    "force_zone": null,
+    "domain_weights": {
+      "traffic": 1,
+      "climate": 1,
+      "health": 1,
+      "environment": 10,
+      "population": 1
+    },
+    "for_pattern": "moderate_air_quality_degradation"
+  },
+  {
+    "scenario_id": "public_gatherings",
+    "name": "LOW: Citywide Public Gatherings",
+    "description": "Population events spread across all zones.",
+    "event_rate": 6,
+    "force_severity": "low",
+    "force_zone": null,
+    "domain_weights": {
+      "traffic": 1,
+      "climate": 1,
+      "health": 1,
+      "environment": 1,
+      "population": 10
+    },
+    "for_pattern": "public_gathering_activity"
+  },
+  {
+    "scenario_id": "industrial_chemical_disaster",
+    "name": "CRITICAL: Industrial Chemical Disaster Cascade",
+    "description": "Multi-domain cascade in the industrial zone: severe chemical pollution triggers respiratory health emergencies, mass evacuation, traffic collapse, and a wind/storm dispersion factor — designed to exercise complex Esper pattern syntax (sequence, quantifiers, negation, optional events).",
+    "event_rate": 15,
+    "force_severity": "critical",
+    "force_zone": "industrial",
+    "domain_weights": {
+      "environment": 8,
+      "health": 8,
+      "traffic": 8,
+      "population": 4,
+      "climate": 3
+    },
+    "for_pattern": "industrial_chemical_disaster_cascade"
+  }
+]

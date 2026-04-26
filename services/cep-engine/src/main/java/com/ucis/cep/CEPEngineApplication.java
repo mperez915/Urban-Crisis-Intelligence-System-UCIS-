@@ -8,8 +8,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 @Slf4j
+@EnableScheduling
 @SpringBootApplication(exclude = {
     org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration.class,
     org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration.class

@@ -85,6 +85,9 @@ services:
       MONGO_URI: mongodb://${MONGO_USERNAME}:${MONGO_PASSWORD}@${MONGO_HOST}:${MONGO_PORT}/ucis_db?authSource=admin
       CEP_RULES_PATH: /app/config/patterns
       LOG_LEVEL: ${LOG_LEVEL}
+      # Increase heap so Esper sliding-window state (4-stream joins over 10 min) fits.
+      # G1GC keeps pause times low on a steady high-throughput stream.
+      JAVA_TOOL_OPTIONS: "-Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dcep.consumer.prefetch=200"
     ports:
       - "${CEP_PORT_HOST}:8081"
     depends_on:
@@ -161,6 +164,9 @@ services:
     networks:
       - ucis-network
     restart: unless-stopped
+    volumes:
+      - ./config/patterns:/app/config/patterns:ro
+      - ./config/scenarios:/app/config/scenarios:ro
 
   # 🖥️ Component 7: React Frontend
   frontend:

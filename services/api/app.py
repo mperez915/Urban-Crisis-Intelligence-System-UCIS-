@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """UCIS REST API Backend"""
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
+import pika
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from pymongo import MongoClient
@@ -21,39 +24,124 @@ mongo_uri = os.getenv(
 client = MongoClient(mongo_uri)
 db = client.ucis_db
 
-ALL_DOMAINS   = ["traffic", "climate", "health", "environment", "population"]
-ALL_ZONES     = ["downtown", "suburbs", "industrial", "residential", "airport"]
+rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
+rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
+rabbitmq_user = os.getenv("RABBITMQ_USERNAME", "admin")
+rabbitmq_pass = os.getenv("RABBITMQ_PASSWORD", "admin123")
+
+ALL_DOMAINS = ["traffic", "climate", "health", "environment", "population"]
+ALL_ZONES = ["downtown", "suburbs", "industrial", "residential", "airport"]
 ALL_SEVERITIES = ["low", "medium", "high", "critical"]
+
+# Paths to JSON files that are the SINGLE SOURCE OF TRUTH for default patterns
+# and default scenarios. Mounted into the container via docker-compose volumes.
+DEFAULT_PATTERNS_PATH = Path(
+    os.getenv("DEFAULT_PATTERNS_PATH", "/app/config/patterns/default_patterns.json")
+)
+DEFAULT_SCENARIOS_PATH = Path(
+    os.getenv("DEFAULT_SCENARIOS_PATH", "/app/config/scenarios/default_scenarios.json")
+)
+
+
+# ── RabbitMQ Queue Management ─────────────────────────────────────────────────
+
+
+def purge_rabbitmq_queues():
+    """
+    Purges RabbitMQ queues when simulator is paused to prevent buffered events
+    from continuing to generate alerts after pause.
+
+    Uses a separate channel for each queue to handle non-existent queues gracefully.
+    """
+    try:
+        credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+        parameters = pika.ConnectionParameters(
+            host=rabbitmq_host,
+            port=rabbitmq_port,
+            credentials=credentials,
+            connection_attempts=3,
+            retry_delay=1,
+        )
+        connection = pika.BlockingConnection(parameters)
+
+        queues_to_purge = [
+            "ucis.enricher.events",  # Cola que consume el Enricher (eventos raw pendientes)
+            "ucis.cep.events",  # Cola que consume el CEP Engine (Esper) - LA MÁS CRÍTICA
+            "ucis.events.enriched",  # Eventos enriquecidos pendientes
+            "ucis.events.complex",  # Alertas complejas ya generadas
+        ]
+
+        purged_counts = {}
+        for queue_name in queues_to_purge:
+            try:
+                # Create a new channel for each queue to avoid channel errors affecting others
+                channel = connection.channel()
+
+                # Try to purge directly - if queue doesn't exist, will raise exception
+                method = channel.queue_purge(queue=queue_name)
+                purged_counts[queue_name] = method.method.message_count
+                logger.info(
+                    f"Purged {purged_counts[queue_name]} messages from queue '{queue_name}'"
+                )
+                channel.close()
+            except pika.exceptions.ChannelClosedByBroker as e:
+                # Queue doesn't exist - this is normal if simulator just started
+                logger.info(
+                    f"Queue '{queue_name}' does not exist yet (will be created when needed)"
+                )
+                purged_counts[queue_name] = 0
+            except Exception as e:
+                logger.warning(f"Could not purge queue '{queue_name}': {e}")
+                purged_counts[queue_name] = 0
+
+        connection.close()
+        logger.info(f"Queue purge completed: {purged_counts}")
+        return purged_counts
+
+    except Exception as e:
+        logger.error(f"Failed to connect to RabbitMQ for queue purging: {e}")
+        return {}
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
+
 
 @app.route("/health")
 def health():
     try:
         db.command("ping")
-        return jsonify({"status": "healthy", "service": "api", "mongo": "connected"}), 200
+        return jsonify(
+            {"status": "healthy", "service": "api", "mongo": "connected"}
+        ), 200
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
 
+
 @app.route("/api/events")
 def list_events():
     try:
-        limit    = min(int(request.args.get("limit", 100)), 500)
-        skip     = int(request.args.get("skip", 0))
-        query    = {}
-        if request.args.get("domain"):   query["domain"]   = request.args["domain"]
-        if request.args.get("zone"):     query["zone"]     = request.args["zone"]
-        if request.args.get("severity"): query["severity"] = request.args["severity"]
+        limit = min(int(request.args.get("limit", 100)), 500)
+        skip = int(request.args.get("skip", 0))
+        query = {}
+        if request.args.get("domain"):
+            query["domain"] = request.args["domain"]
+        if request.args.get("zone"):
+            query["zone"] = request.args["zone"]
+        if request.args.get("severity"):
+            query["severity"] = request.args["severity"]
 
-        events = list(db.events.find(query).sort("timestamp", -1).skip(skip).limit(limit))
+        events = list(
+            db.events.find(query).sort("timestamp", -1).skip(skip).limit(limit)
+        )
         for e in events:
             e["_id"] = str(e["_id"])
         count = db.events.count_documents(query)
-        return jsonify({"events": events, "count": count, "limit": limit, "skip": skip}), 200
+        return jsonify(
+            {"events": events, "count": count, "limit": limit, "skip": skip}
+        ), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -72,6 +160,7 @@ def get_event(event_id):
 
 # ── Complex Events ────────────────────────────────────────────────────────────
 
+
 @app.route("/api/events/complex", methods=["GET"])
 def list_complex_events():
     """
@@ -81,64 +170,87 @@ def list_complex_events():
     """
     try:
         since_minutes = int(request.args.get("since", 60))
-        pattern_id    = request.args.get("pattern_id")
-        alert_level   = request.args.get("alert_level")
-        grouped       = request.args.get("grouped", "true").lower() != "false"
+        pattern_id = request.args.get("pattern_id")
+        alert_level = request.args.get("alert_level")
+        grouped = request.args.get("grouped", "true").lower() != "false"
 
         # Build time-window match
         match = {}
-        if pattern_id:  match["pattern_id"]  = pattern_id
-        if alert_level: match["alert_level"]  = alert_level
+        if pattern_id:
+            match["pattern_id"] = pattern_id
+        if alert_level:
+            match["alert_level"] = alert_level
         if since_minutes > 0:
-            cutoff     = datetime.utcnow() - timedelta(minutes=since_minutes)
+            cutoff = datetime.utcnow() - timedelta(minutes=since_minutes)
             cutoff_iso = cutoff.isoformat() + "Z"
             match["$or"] = [
                 {"created_at": {"$gte": cutoff}},
-                {"timestamp":  {"$gte": cutoff_iso}},
+                {"timestamp": {"$gte": cutoff_iso}},
             ]
 
         if grouped:
             pipeline = [
                 {"$match": match},
-                {"$group": {
-                    "_id": {
-                        "pattern_id":   "$pattern_id",
-                        "pattern_name": "$pattern_name",
-                        "alert_level":  "$alert_level",
-                        "zone":         "$zone",
-                    },
-                    "occurrences": {"$sum": 1},
-                    "last_seen":   {"$max": "$timestamp"},
-                    "description": {"$first": "$description"},
-                }},
+                {
+                    "$group": {
+                        "_id": {
+                            "pattern_id": "$pattern_id",
+                            "pattern_name": "$pattern_name",
+                            "alert_level": "$alert_level",
+                            "zone": "$zone",
+                        },
+                        "occurrences": {"$sum": 1},
+                        "last_seen": {"$max": "$timestamp"},
+                        "description": {"$first": "$description"},
+                    }
+                },
                 {"$sort": {"last_seen": -1, "occurrences": -1}},
             ]
             rows = list(db.complex_events.aggregate(pipeline))
-            events = [{
-                "pattern_id":   r["_id"]["pattern_id"],
-                "pattern_name": r["_id"].get("pattern_name") or r["_id"]["pattern_id"],
-                "alert_level":  r["_id"]["alert_level"],
-                "zone":         r["_id"].get("zone") or "—",
-                "occurrences":  r["occurrences"],
-                "last_seen":    r["last_seen"],
-                "description":  r.get("description", ""),
-            } for r in rows]
-            return jsonify({
-                "events": events,
-                "count":  len(events),
-                "grouped": True,
-                "since_minutes": since_minutes,
-            }), 200
+            events = [
+                {
+                    "pattern_id": r["_id"]["pattern_id"],
+                    "pattern_name": r["_id"].get("pattern_name")
+                    or r["_id"]["pattern_id"],
+                    "alert_level": r["_id"]["alert_level"],
+                    "zone": r["_id"].get("zone") or "—",
+                    "occurrences": r["occurrences"],
+                    "last_seen": r["last_seen"],
+                    # Alias so the frontend can filter grouped rows by time
+                    # the same way it does for raw complex events.
+                    "timestamp": r["last_seen"],
+                    "description": r.get("description", ""),
+                }
+                for r in rows
+            ]
+            return jsonify(
+                {
+                    "events": events,
+                    "count": len(events),
+                    "grouped": True,
+                    "since_minutes": since_minutes,
+                }
+            ), 200
 
         # Raw mode (ungrouped) — for Load more
         limit = min(int(request.args.get("limit", 50)), 500)
-        skip  = int(request.args.get("skip", 0))
-        raw   = list(db.complex_events.find(match).sort("timestamp", -1).skip(skip).limit(limit))
+        skip = int(request.args.get("skip", 0))
+        raw = list(
+            db.complex_events.find(match).sort("timestamp", -1).skip(skip).limit(limit)
+        )
         for e in raw:
             e["_id"] = str(e["_id"])
         count = db.complex_events.count_documents(match)
-        return jsonify({"events": raw, "count": count, "limit": limit, "skip": skip,
-                        "grouped": False, "since_minutes": since_minutes}), 200
+        return jsonify(
+            {
+                "events": raw,
+                "count": count,
+                "limit": limit,
+                "skip": skip,
+                "grouped": False,
+                "since_minutes": since_minutes,
+            }
+        ), 200
 
     except Exception as e:
         logger.error("Error listing complex events: %s", e)
@@ -168,6 +280,7 @@ def ingest_complex_event():
 
 # ── Patterns ──────────────────────────────────────────────────────────────────
 
+
 @app.route("/api/patterns")
 def list_patterns():
     try:
@@ -183,21 +296,23 @@ def list_patterns():
 def create_pattern():
     try:
         data = request.json
-        now  = datetime.utcnow().isoformat() + "Z"
+        now = datetime.utcnow().isoformat() + "Z"
         pattern = {
-            "pattern_id":    data["pattern_id"],
-            "name":          data.get("name", ""),
-            "description":   data.get("description", ""),
-            "epl_rule":      data["epl_rule"],
-            "severity":      data.get("severity", "medium"),
-            "enabled":       data.get("enabled", True),
+            "pattern_id": data["pattern_id"],
+            "name": data.get("name", ""),
+            "description": data.get("description", ""),
+            "epl_rule": data["epl_rule"],
+            "severity": data.get("severity", "medium"),
+            "enabled": data.get("enabled", True),
             "input_domains": data.get("input_domains", []),
-            "match_count":   0,
-            "created_at":    now,
-            "updated_at":    now,
+            "match_count": 0,
+            "created_at": now,
+            "updated_at": now,
         }
         result = db.patterns.insert_one(pattern)
-        return jsonify({"_id": str(result.inserted_id), "pattern_id": pattern["pattern_id"]}), 201
+        return jsonify(
+            {"_id": str(result.inserted_id), "pattern_id": pattern["pattern_id"]}
+        ), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -228,99 +343,156 @@ def delete_pattern(pattern_id):
 
 # ── Statistics ────────────────────────────────────────────────────────────────
 
+
 @app.route("/api/stats/events-per-minute")
 def events_per_minute():
     """
-    Returns event counts bucketed by time.
-    Uses 10-second buckets for the last 10 minutes (good for fast simulations),
-    and falls back to 1-minute buckets for the full last hour when there are
-    enough spread-out data points.
-    The client receives both series and a 'granularity' hint.
+    Returns event counts bucketed by time, with severity breakdown.
+    Granularity is selected by the client via ?granularity=10s|1m|5m
+      - 10s : last 10 minutes  (60 buckets max)
+      - 1m  : last hour        (60 buckets max)
+      - 5m  : last 6 hours     (72 buckets max)
     """
     try:
-        now          = datetime.utcnow()
-        ten_min_ago  = now - timedelta(minutes=10)
-        one_hour_ago = now - timedelta(hours=1)
+        granularity = request.args.get("granularity", "10s").lower()
+        if granularity not in ("10s", "1m", "5m"):
+            granularity = "10s"
 
-        ten_min_ago_iso  = ten_min_ago.isoformat() + "Z"
-        one_hour_ago_iso = one_hour_ago.isoformat() + "Z"
+        # Per-granularity config: window length, bucket size in ms, label, x-axis format
+        config = {
+            "10s": {
+                "window": timedelta(minutes=10),
+                "bucket_ms": 10_000,
+                "label": "Events per 10 s (last 10 min)",
+                "fmt": "%H:%M:%S",
+            },
+            "1m": {
+                "window": timedelta(hours=1),
+                "bucket_ms": 60_000,
+                "label": "Events per minute (last hour)",
+                "fmt": "%H:%M",
+            },
+            "5m": {
+                "window": timedelta(hours=6),
+                "bucket_ms": 300_000,
+                "label": "Events per 5 min (last 6 h)",
+                "fmt": "%H:%M",
+            },
+        }[granularity]
+
+        now = datetime.utcnow()
+        since = now - config["window"]
+        since_iso = since.isoformat() + "Z"
 
         def _date_expr():
-            return {"$cond": [
-                {"$ifNull": ["$created_at", False]},
-                "$created_at",
-                {"$toDate": "$timestamp"},
-            ]}
+            return {
+                "$cond": [
+                    {"$ifNull": ["$created_at", False]},
+                    "$created_at",
+                    {"$toDate": "$timestamp"},
+                ]
+            }
 
-        # ── 10-second buckets for last 10 minutes ──────────────────────────
-        pipeline_10s = [
-            {"$match": {"$or": [
-                {"created_at": {"$gte": ten_min_ago}},
-                {"timestamp":  {"$gte": ten_min_ago_iso}},
-            ]}},
-            {"$group": {
-                "_id": {"$dateToString": {
-                    "format": "%Y-%m-%dT%H:%M:%S0Z",   # truncate to 10s
-                    "date":   _date_expr(),
-                }},
-                "count": {"$sum": 1},
-            }},
+        pipeline = [
+            {
+                "$match": {
+                    "$or": [
+                        {"created_at": {"$gte": since}},
+                        {"timestamp": {"$gte": since_iso}},
+                    ]
+                }
+            },
+            {
+                "$addFields": {
+                    "_ts": {"$toLong": _date_expr()},
+                    "_sev": {"$ifNull": ["$severity", "unknown"]},
+                }
+            },
+            {
+                "$group": {
+                    "_id": {
+                        "$subtract": [
+                            "$_ts",
+                            {"$mod": ["$_ts", config["bucket_ms"]]},
+                        ]
+                    },
+                    "count": {"$sum": 1},
+                    "low": {"$sum": {"$cond": [{"$eq": ["$_sev", "low"]}, 1, 0]}},
+                    "medium": {"$sum": {"$cond": [{"$eq": ["$_sev", "medium"]}, 1, 0]}},
+                    "high": {"$sum": {"$cond": [{"$eq": ["$_sev", "high"]}, 1, 0]}},
+                    "critical": {
+                        "$sum": {"$cond": [{"$eq": ["$_sev", "critical"]}, 1, 0]}
+                    },
+                }
+            },
             {"$sort": {"_id": 1}},
+            {
+                "$project": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": config["fmt"],
+                            "date": {"$toDate": "$_id"},
+                        }
+                    },
+                    "bucket_ms": "$_id",
+                    "count": 1,
+                    "low": 1,
+                    "medium": 1,
+                    "high": 1,
+                    "critical": 1,
+                }
+            },
         ]
 
-        # Truncating to 10s with string manipulation: keep first 18 chars + "0Z"
-        # MongoDB doesn't have a built-in 10s bucket, so we truncate the seconds digit
-        # by flooring seconds to the nearest 10. We do this via $subtract on epoch ms.
-        pipeline_10s = [
-            {"$match": {"$or": [
-                {"created_at": {"$gte": ten_min_ago}},
-                {"timestamp":  {"$gte": ten_min_ago_iso}},
-            ]}},
-            {"$addFields": {
-                "_ts": {"$toLong": _date_expr()},
-            }},
-            {"$group": {
-                "_id": {
-                    "$subtract": ["$_ts", {"$mod": ["$_ts", 10000]}]
-                },
-                "count": {"$sum": 1},
-            }},
-            {"$sort": {"_id": 1}},
-            {"$project": {
-                "_id": {"$dateToString": {
-                    "format": "%H:%M:%S",
-                    "date": {"$toDate": "$_id"},
-                }},
-                "count": 1,
-            }},
-        ]
+        data = list(db.events.aggregate(pipeline))
 
-        # ── 1-minute buckets for last hour ────────────────────────────────
-        pipeline_1m = [
-            {"$match": {"$or": [
-                {"created_at": {"$gte": one_hour_ago}},
-                {"timestamp":  {"$gte": one_hour_ago_iso}},
-            ]}},
-            {"$group": {
-                "_id": {"$dateToString": {
-                    "format": "%H:%M",
-                    "date": _date_expr(),
-                }},
-                "count": {"$sum": 1},
-            }},
-            {"$sort": {"_id": 1}},
-        ]
+        # Backfill missing buckets with zeros so the chart length is stable across polls
+        # (otherwise empty intervals make the line jump around).
+        bucket_ms = config["bucket_ms"]
+        end_ms = int(now.timestamp() * 1000)
+        end_ms -= end_ms % bucket_ms
+        start_ms = int(since.timestamp() * 1000)
+        start_ms -= start_ms % bucket_ms
 
-        data_10s = list(db.events.aggregate(pipeline_10s))
-        data_1m  = list(db.events.aggregate(pipeline_1m))
+        existing = {row.get("bucket_ms"): row for row in data}
+        filled = []
+        cursor = start_ms
+        while cursor <= end_ms:
+            if cursor in existing:
+                row = existing[cursor]
+                filled.append(
+                    {
+                        "_id": row["_id"],
+                        "bucket_ms": cursor,
+                        "count": row.get("count", 0),
+                        "low": row.get("low", 0),
+                        "medium": row.get("medium", 0),
+                        "high": row.get("high", 0),
+                        "critical": row.get("critical", 0),
+                    }
+                )
+            else:
+                bucket_dt = datetime.utcfromtimestamp(cursor / 1000)
+                filled.append(
+                    {
+                        "_id": bucket_dt.strftime(config["fmt"]),
+                        "bucket_ms": cursor,
+                        "count": 0,
+                        "low": 0,
+                        "medium": 0,
+                        "high": 0,
+                        "critical": 0,
+                    }
+                )
+            cursor += bucket_ms
 
-        # Choose which series to return:
-        # prefer 10s if it has more than 1 bucket (spread across time),
-        # otherwise fall back to 1m so the chart always has context.
-        if len(data_10s) > 1:
-            return jsonify({"data": data_10s, "granularity": "10s", "label": "Events per 10 s (last 10 min)"}), 200
-        else:
-            return jsonify({"data": data_1m,  "granularity": "1m",  "label": "Events per minute (last hour)"}), 200
+        return jsonify(
+            {
+                "data": filled,
+                "granularity": granularity,
+                "label": config["label"],
+            }
+        ), 200
 
     except Exception as e:
         logger.error("Error getting events rate: %s", e)
@@ -343,16 +515,21 @@ def top_alerts():
 @app.route("/api/stats/zones/<zone>")
 def zone_stats(zone):
     try:
-        return jsonify({
-            "zone": zone,
-            "event_count":         db.events.count_documents({"zone": zone}),
-            "complex_event_count": db.complex_events.count_documents({"zone": zone}),
-        }), 200
+        return jsonify(
+            {
+                "zone": zone,
+                "event_count": db.events.count_documents({"zone": zone}),
+                "complex_event_count": db.complex_events.count_documents(
+                    {"zone": zone}
+                ),
+            }
+        ), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ── Simulator Config ──────────────────────────────────────────────────────────
+
 
 @app.route("/api/simulator/config")
 def get_simulator_config():
@@ -370,32 +547,71 @@ def update_simulator_config():
     Patch the live simulator config.
     Accepted fields: event_rate, paused, active_scenario_id,
                      force_domain, force_zone, force_severity
+
+    When paused=True is set, automatically purges RabbitMQ queues to stop
+    buffered events from continuing to generate alerts.
     """
     try:
-        data    = request.json or {}
-        allowed = {"event_rate", "paused", "active_scenario_id",
-                   "force_domain", "force_zone", "force_severity"}
-        update  = {k: v for k, v in data.items() if k in allowed}
+        data = request.json or {}
+        allowed = {
+            "event_rate",
+            "paused",
+            "active_scenario_id",
+            "force_domain",
+            "force_zone",
+            "force_severity",
+        }
+        update = {k: v for k, v in data.items() if k in allowed}
 
         if "event_rate" in update:
             update["event_rate"] = max(1, min(int(update["event_rate"]), 20))
-        if "force_domain" in update and update["force_domain"] not in (ALL_DOMAINS + [None, ""]):
-            return jsonify({"error": f"Invalid domain. Choose from: {ALL_DOMAINS}"}), 400
-        if "force_zone" in update and update["force_zone"] not in (ALL_ZONES + [None, ""]):
+        if "force_domain" in update and update["force_domain"] not in (
+            ALL_DOMAINS + [None, ""]
+        ):
+            return jsonify(
+                {"error": f"Invalid domain. Choose from: {ALL_DOMAINS}"}
+            ), 400
+        if "force_zone" in update and update["force_zone"] not in (
+            ALL_ZONES + [None, ""]
+        ):
             return jsonify({"error": f"Invalid zone. Choose from: {ALL_ZONES}"}), 400
-        if "force_severity" in update and update["force_severity"] not in (ALL_SEVERITIES + [None, ""]):
-            return jsonify({"error": f"Invalid severity. Choose from: {ALL_SEVERITIES}"}), 400
+        if "force_severity" in update and update["force_severity"] not in (
+            ALL_SEVERITIES + [None, ""]
+        ):
+            return jsonify(
+                {"error": f"Invalid severity. Choose from: {ALL_SEVERITIES}"}
+            ), 400
+
+        # Check if simulator is being paused
+        current_config = (
+            db.simulator_config.find_one({"_id": "main"}) or _default_sim_config()
+        )
+        was_paused = current_config.get("paused", False)
+        is_pausing = update.get("paused", False) and not was_paused
 
         update["updated_at"] = datetime.utcnow().isoformat() + "Z"
         db.simulator_config.update_one({"_id": "main"}, {"$set": update}, upsert=True)
+
+        # If simulator is being paused, purge RabbitMQ queues
+        purge_info = {}
+        if is_pausing:
+            logger.info("Simulator paused - purging RabbitMQ queues...")
+            purge_info = purge_rabbitmq_queues()
+
         cfg = db.simulator_config.find_one({"_id": "main"})
         cfg.pop("_id", None)
+
+        # Include purge information in response if queues were purged
+        if purge_info:
+            cfg["queues_purged"] = purge_info
+
         return jsonify(cfg), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
+
 
 @app.route("/api/scenarios")
 def list_scenarios():
@@ -413,24 +629,24 @@ def create_scenario():
     """Create a custom scenario."""
     try:
         data = request.json or {}
-        err  = _validate_scenario(data)
+        err = _validate_scenario(data)
         if err:
             return jsonify({"error": err}), 400
 
         now = datetime.utcnow().isoformat() + "Z"
         scenario = {
-            "scenario_id":     data["scenario_id"],
-            "name":            data.get("name", data["scenario_id"]),
-            "description":     data.get("description", ""),
-            "is_preset":       False,
+            "scenario_id": data["scenario_id"],
+            "name": data.get("name", data["scenario_id"]),
+            "description": data.get("description", ""),
+            "is_preset": False,
             # runtime params
-            "event_rate":      max(1, min(int(data.get("event_rate", 10)), 500)),
-            "force_severity":  data.get("force_severity") or None,
-            "force_zone":      data.get("force_zone") or None,
+            "event_rate": max(1, min(int(data.get("event_rate", 10)), 500)),
+            "force_severity": data.get("force_severity") or None,
+            "force_zone": data.get("force_zone") or None,
             # domain weights: 1–10, default 1 for unspecified
-            "domain_weights":  _clean_weights(data.get("domain_weights", {})),
-            "created_at":      now,
-            "updated_at":      now,
+            "domain_weights": _clean_weights(data.get("domain_weights", {})),
+            "created_at": now,
+            "updated_at": now,
         }
         if db.scenarios.find_one({"scenario_id": scenario["scenario_id"]}):
             return jsonify({"error": "scenario_id already exists"}), 409
@@ -450,10 +666,12 @@ def update_scenario(scenario_id):
         if not existing:
             return jsonify({"error": "Scenario not found"}), 404
         if existing.get("is_preset"):
-            return jsonify({"error": "Built-in presets cannot be edited. Clone them first."}), 403
+            return jsonify(
+                {"error": "Built-in presets cannot be edited. Clone them first."}
+            ), 403
 
         data = request.json or {}
-        err  = _validate_scenario(data, is_update=True)
+        err = _validate_scenario(data, is_update=True)
         if err:
             return jsonify({"error": err}), 400
 
@@ -499,14 +717,16 @@ def activate_scenario(scenario_id):
 
         cfg_update = {
             "active_scenario_id": scenario_id,
-            "event_rate":         scenario.get("event_rate", 10),
-            "force_severity":     scenario.get("force_severity") or None,
-            "force_zone":         scenario.get("force_zone") or None,
-            "force_domain":       None,   # scenarios use domain_weights, not a single forced domain
-            "paused":             False,
-            "updated_at":         datetime.utcnow().isoformat() + "Z",
+            "event_rate": scenario.get("event_rate", 10),
+            "force_severity": scenario.get("force_severity") or None,
+            "force_zone": scenario.get("force_zone") or None,
+            "force_domain": None,  # scenarios use domain_weights, not a single forced domain
+            "paused": False,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
         }
-        db.simulator_config.update_one({"_id": "main"}, {"$set": cfg_update}, upsert=True)
+        db.simulator_config.update_one(
+            {"_id": "main"}, {"$set": cfg_update}, upsert=True
+        )
 
         cfg = db.simulator_config.find_one({"_id": "main"})
         cfg.pop("_id", None)
@@ -523,25 +743,25 @@ def clone_scenario(scenario_id):
         if not source:
             return jsonify({"error": "Scenario not found"}), 404
 
-        data       = request.json or {}
-        new_id     = data.get("new_scenario_id", f"{scenario_id}_copy")
-        new_name   = data.get("new_name", f"{source.get('name', scenario_id)} (copy)")
+        data = request.json or {}
+        new_id = data.get("new_scenario_id", f"{scenario_id}_copy")
+        new_name = data.get("new_name", f"{source.get('name', scenario_id)} (copy)")
 
         if db.scenarios.find_one({"scenario_id": new_id}):
             return jsonify({"error": f"scenario_id '{new_id}' already exists"}), 409
 
-        now  = datetime.utcnow().isoformat() + "Z"
+        now = datetime.utcnow().isoformat() + "Z"
         clone = {
-            "scenario_id":    new_id,
-            "name":           new_name,
-            "description":    data.get("description", source.get("description", "")),
-            "is_preset":      False,
-            "event_rate":     source.get("event_rate", 10),
+            "scenario_id": new_id,
+            "name": new_name,
+            "description": data.get("description", source.get("description", "")),
+            "is_preset": False,
+            "event_rate": source.get("event_rate", 10),
             "force_severity": source.get("force_severity"),
-            "force_zone":     source.get("force_zone"),
+            "force_zone": source.get("force_zone"),
             "domain_weights": source.get("domain_weights", {}),
-            "created_at":     now,
-            "updated_at":     now,
+            "created_at": now,
+            "updated_at": now,
         }
         result = db.scenarios.insert_one(clone)
         clone["_id"] = str(result.inserted_id)
@@ -552,10 +772,13 @@ def clone_scenario(scenario_id):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _validate_scenario(data: dict, is_update: bool = False) -> str | None:
     if not is_update and not data.get("scenario_id", "").strip():
         return "scenario_id is required"
-    if "force_severity" in data and data["force_severity"] not in (ALL_SEVERITIES + [None, ""]):
+    if "force_severity" in data and data["force_severity"] not in (
+        ALL_SEVERITIES + [None, ""]
+    ):
         return f"force_severity must be one of {ALL_SEVERITIES} or empty"
     if "force_zone" in data and data["force_zone"] not in (ALL_ZONES + [None, ""]):
         return f"force_zone must be one of {ALL_ZONES} or empty"
@@ -584,111 +807,140 @@ def _clean_weights(raw: dict) -> dict:
 
 def _default_sim_config() -> dict:
     return {
-        "event_rate": 3, "paused": False,
-        "active_scenario_id": "normal",
-        "force_domain": None, "force_zone": None, "force_severity": None,
+        "event_rate": 3,
+        "paused": True,
+        "active_scenario_id": "test_downtown_congestion",
+        "force_domain": None,
+        "force_zone": None,
+        "force_severity": None,
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
 
 
 # ── Error handlers ────────────────────────────────────────────────────────────
 
+
 @app.errorhandler(404)
-def not_found(_): return jsonify({"error": "Not found"}), 404
+def not_found(_):
+    return jsonify({"error": "Not found"}), 404
+
 
 @app.errorhandler(500)
-def server_error(_): return jsonify({"error": "Internal server error"}), 500
+def server_error(_):
+    return jsonify({"error": "Internal server error"}), 500
 
 
 # ── Seed data ─────────────────────────────────────────────────────────────────
 
+
+def _load_json_file(path: Path) -> list:
+    """Load a JSON file that must contain a top-level list. Returns [] on error."""
+    try:
+        if not path.exists():
+            logger.warning("Config file not found: %s", path)
+            return []
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, list):
+            logger.error(
+                "Expected a JSON array in %s, got %s", path, type(data).__name__
+            )
+            return []
+        return data
+    except Exception as e:
+        logger.error("Failed to load %s: %s", path, e)
+        return []
+
+
 def seed_default_patterns():
-    if db.patterns.count_documents({}) > 0:
+    """
+    Reconcile system-managed patterns with config/patterns/default_patterns.json.
+
+    The JSON file is the single source of truth. System-seeded patterns
+    (created_by='system') are wiped and re-inserted on every startup so a
+    rebuild always reflects the JSON. User-created patterns are preserved.
+    """
+    defaults = _load_json_file(DEFAULT_PATTERNS_PATH)
+    if not defaults:
+        logger.warning(
+            "No default patterns loaded from %s — skipping seed", DEFAULT_PATTERNS_PATH
+        )
         return
+
     now = datetime.utcnow().isoformat() + "Z"
-    defaults = [
-        {"pattern_id": "high_traffic_congestion_enriched",         "name": "High Traffic Congestion in Risk Zone",                "description": "Detects sustained high-severity traffic congestion in high-risk zones.",               "epl_rule": "SELECT zone, COUNT(*) as incident_count, AVG(average_speed_kmh) as avg_speed FROM TrafficEvent(type='congestion', severity in ('high','critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 2",                                                                                                                                                    "severity": "high",     "input_domains": ["traffic"]},
-        {"pattern_id": "accident_with_insufficient_response",       "name": "Critical Accident — Insufficient Response",          "description": "Detects critical traffic accidents in zones with limited hospital or police access.",   "epl_rule": "SELECT zone, type, severity FROM TrafficEvent WHERE type='accident' AND severity='critical'",                                                                                                                                                                                                                                                                                                 "severity": "critical", "input_domains": ["traffic"]},
-        {"pattern_id": "hazardous_weather_in_critical_zone",        "name": "Severe Weather in Critical Zone",                    "description": "Detects severe weather correlating with accidents in critical zones.",                  "epl_rule": "SELECT * FROM PATTERN [c=ClimateEvent(type='storm', severity='high') -> t=TrafficEvent(type='accident')] WHERE c.zone = t.zone",                                                                                                                                                                                                                                                                          "severity": "critical", "input_domains": ["climate", "traffic"]},
-        {"pattern_id": "air_quality_health_emergency_correlation",  "name": "Poor Air Quality → Health Emergencies",             "description": "Correlates poor air quality with respiratory/cardiac emergency calls.",                "epl_rule": "SELECT a.zone, a.aqi, COUNT(h) as emergency_calls FROM PATTERN [a=EnvironmentEvent(type='air_quality', severity in ('high','critical')) -> h=HealthEvent(type='emergency_call', call_type in ('respiratory','cardiac'))].win:time(30 min) WHERE a.zone = h.zone GROUP BY a.zone, a.aqi",                                                                                                                        "severity": "high",     "input_domains": ["environment", "health"]},
-        {"pattern_id": "crowd_alert_in_low_response_zone",          "name": "Large Crowd — Limited Emergency Response",          "description": "Detects large crowds in zones with limited emergency service response.",               "epl_rule": "SELECT zone, location, SUM(estimated_population) as total_population FROM PopulationEvent(type in ('gathering','crowd_alert'), severity in ('high','critical')).win:time(5 min) GROUP BY zone, location HAVING SUM(estimated_population) > 5000",                                                                                                                                                       "severity": "high",     "input_domains": ["population"]},
-        {"pattern_id": "emergency_services_overwhelmed",            "name": "Emergency Services Overwhelmed",                    "description": "Detects surge in emergency calls within a short time window.",                        "epl_rule": "SELECT zone, COUNT(*) as emergency_count FROM HealthEvent(type='emergency_call', severity in ('high','critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 5",                                                                                                                                                                                                                                       "severity": "critical", "input_domains": ["health"]},
-        {"pattern_id": "critical_pollution_spike",                  "name": "Critical Pollution Spike",                          "description": "Alerts on critical pollution levels with AQI above 400.",                             "epl_rule": "SELECT zone, type, severity, aqi FROM EnvironmentEvent(severity='critical').win:time(1 min) WHERE aqi > 400",                                                                                                                                                                                                                                                                                            "severity": "critical", "input_domains": ["environment"]},
-        {"pattern_id": "multi_domain_crisis_critical_zone",         "name": "Multi-Domain Crisis — Critical Zone",               "description": "Simultaneous critical events across traffic, weather, and population.",               "epl_rule": "SELECT t.zone, COUNT(*) as event_count FROM PATTERN [t=TrafficEvent(severity='critical') and c=ClimateEvent(severity='critical') and p=PopulationEvent(severity='critical')] WHERE t.zone = c.zone AND c.zone = p.zone",                                                                                                                                                                                "severity": "critical", "input_domains": ["traffic", "climate", "population"]},
-    ]
+    removed = db.patterns.delete_many({"created_by": "system"}).deleted_count
+
+    docs = []
     for p in defaults:
-        p.update({"uses_enrichment": True, "version": 2, "created_by": "system",
-                  "enabled": True, "created_at": now, "updated_at": now, "match_count": 0})
-    db.patterns.insert_many(defaults)
-    logger.info("Seeded %d default patterns", len(defaults))
+        if "pattern_id" not in p or "epl_rule" not in p:
+            logger.warning("Skipping malformed pattern entry: %s", p)
+            continue
+        doc = dict(p)
+        doc.setdefault("enabled", True)
+        doc.setdefault("severity", "medium")
+        doc.setdefault("input_domains", [])
+        doc.setdefault("uses_enrichment", False)
+        doc.setdefault("version", 1)
+        doc["created_by"] = "system"
+        doc["created_at"] = now
+        doc["updated_at"] = now
+        doc["match_count"] = 0
+        docs.append(doc)
+
+    if docs:
+        db.patterns.insert_many(docs)
+        db.patterns.create_index("pattern_id", unique=True)
+    logger.info(
+        "Seeded %d pattern(s) from %s (removed %d stale system patterns)",
+        len(docs),
+        DEFAULT_PATTERNS_PATH,
+        removed,
+    )
 
 
 def seed_default_scenarios():
-    if db.scenarios.count_documents({"is_preset": True}) > 0:
+    """
+    Reconcile preset scenarios with config/scenarios/default_scenarios.json.
+
+    The JSON file is the single source of truth. Preset scenarios
+    (is_preset=True) are wiped and re-inserted on every startup. User-created
+    scenarios are preserved.
+    """
+    defaults = _load_json_file(DEFAULT_SCENARIOS_PATH)
+    if not defaults:
+        logger.warning(
+            "No default scenarios loaded from %s — skipping seed",
+            DEFAULT_SCENARIOS_PATH,
+        )
         return
+
     now = datetime.utcnow().isoformat() + "Z"
-    presets = [
-        {
-            "scenario_id": "normal",
-            "name": "Normal Operations",
-            "description": "Balanced sensor readings across all domains. Good baseline for demos — low noise, occasional medium-severity events.",
-            "event_rate": 3,
-            "force_severity": None,
-            "force_zone": None,
-            "domain_weights": {"traffic": 2, "climate": 2, "health": 2, "environment": 2, "population": 2},
-        },
-        {
-            "scenario_id": "rush_hour",
-            "name": "Rush Hour",
-            "description": "Elevated traffic and population readings across downtown and suburbs, as would be seen during peak commute hours.",
-            "event_rate": 5,
-            "force_severity": None,
-            "force_zone": None,
-            "domain_weights": {"traffic": 6, "climate": 1, "health": 2, "environment": 2, "population": 4},
-        },
-        {
-            "scenario_id": "industrial_pollution",
-            "name": "Industrial Pollution Spike",
-            "description": "Critical AQI sensor readings in the industrial zone, correlating with respiratory health emergencies nearby.",
-            "event_rate": 5,
-            "force_severity": "critical",
-            "force_zone": "industrial",
-            "domain_weights": {"traffic": 1, "climate": 1, "health": 4, "environment": 8, "population": 1},
-        },
-        {
-            "scenario_id": "mass_event",
-            "name": "Mass Public Event",
-            "description": "Large crowd gathering downtown triggering population density alerts and elevated health and traffic incidents.",
-            "event_rate": 6,
-            "force_severity": None,
-            "force_zone": "downtown",
-            "domain_weights": {"traffic": 4, "climate": 1, "health": 4, "environment": 1, "population": 8},
-        },
-        {
-            "scenario_id": "storm_crisis",
-            "name": "Severe Storm Crisis",
-            "description": "Extreme weather sensor readings driving traffic accidents and health emergencies across all zones.",
-            "event_rate": 6,
-            "force_severity": "high",
-            "force_zone": None,
-            "domain_weights": {"traffic": 4, "climate": 8, "health": 3, "environment": 2, "population": 1},
-        },
-        {
-            "scenario_id": "multi_domain_crisis",
-            "name": "Multi-Domain Urban Crisis",
-            "description": "Simultaneous critical sensor failures across all domains and zones — maximum stress scenario for CEP pattern detection.",
-            "event_rate": 10,
-            "force_severity": "critical",
-            "force_zone": None,
-            "domain_weights": {"traffic": 3, "climate": 3, "health": 3, "environment": 3, "population": 3},
-        },
-    ]
-    for s in presets:
-        s.update({"is_preset": True, "created_at": now, "updated_at": now})
-    db.scenarios.insert_many(presets)
-    # Ensure unique index on scenario_id
-    db.scenarios.create_index("scenario_id", unique=True)
-    logger.info("Seeded %d preset scenarios", len(presets))
+    removed = db.scenarios.delete_many({"is_preset": True}).deleted_count
+
+    docs = []
+    for s in defaults:
+        if "scenario_id" not in s:
+            logger.warning("Skipping malformed scenario entry: %s", s)
+            continue
+        doc = dict(s)
+        doc["is_preset"] = True
+        doc["created_at"] = now
+        doc["updated_at"] = now
+        doc.setdefault("event_rate", 5)
+        doc.setdefault("force_severity", None)
+        doc.setdefault("force_zone", None)
+        doc.setdefault("domain_weights", {d: 1 for d in ALL_DOMAINS})
+        docs.append(doc)
+
+    if docs:
+        db.scenarios.insert_many(docs)
+        db.scenarios.create_index("scenario_id", unique=True)
+    logger.info(
+        "Seeded %d scenario(s) from %s (removed %d stale presets)",
+        len(docs),
+        DEFAULT_SCENARIOS_PATH,
+        removed,
+    )
 
 
 def seed_simulator_config():
@@ -699,8 +951,63 @@ def seed_simulator_config():
         logger.info("Seeded default simulator config")
 
 
+def reset_runtime_data_if_new_build():
+    """
+    Detects a fresh build by comparing the build marker baked into the image
+    (/app/.build_id, regenerated by Dockerfile on every rebuild of the COPY
+    layer) with the value previously stored in MongoDB (db.meta._id='build').
+
+    When the values differ — or when the env var RESET_DB_ON_START is truthy —
+    all transient collections are wiped so the next startup produces a clean
+    slate before the JSON seeders re-populate patterns and scenarios.
+    Collections preserved: 'meta' (build marker), 'patterns' and 'scenarios'
+    are fully reset by their own seeders immediately after.
+    """
+    marker_path = Path("/app/.build_id")
+    current_build = (
+        marker_path.read_text().strip() if marker_path.exists() else "unknown"
+    )
+    stored = db.meta.find_one({"_id": "build"})
+    stored_build = stored.get("build_id") if stored else None
+
+    forced = os.getenv("RESET_DB_ON_START", "").lower() in ("1", "true", "yes")
+    if stored_build == current_build and not forced:
+        logger.info("Build marker unchanged (%s) — skipping DB reset", current_build)
+        return
+
+    reason = (
+        "RESET_DB_ON_START=true"
+        if forced
+        else f"new build detected ({stored_build} → {current_build})"
+    )
+    logger.warning("Wiping runtime MongoDB collections: %s", reason)
+
+    collections_to_wipe = [
+        "events",
+        "complex_events",
+        "simulator_config",
+        "patterns",
+        "scenarios",
+    ]
+    for name in collections_to_wipe:
+        result = db[name].delete_many({})
+        logger.info("  • %s: removed %d document(s)", name, result.deleted_count)
+
+    db.meta.replace_one(
+        {"_id": "build"},
+        {
+            "_id": "build",
+            "build_id": current_build,
+            "reset_at": datetime.utcnow().isoformat() + "Z",
+        },
+        upsert=True,
+    )
+    logger.info("Runtime data reset complete; seeders will re-populate from JSON")
+
+
 if __name__ == "__main__":
     logger.info("Starting UCIS API Backend...")
+    reset_runtime_data_if_new_build()
     seed_default_patterns()
     seed_default_scenarios()
     seed_simulator_config()

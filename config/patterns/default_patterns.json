@@ -1,114 +1,68 @@
 [
   {
-    "pattern_id": "high_traffic_congestion_enriched",
-    "name": "High Traffic Congestion in Risk Zone",
-    "description": "Detects sustained high-severity traffic congestion in high-risk zones. Uses enriched data to assess zone risk level and available infrastructure response.",
-    "epl_rule": "SELECT zone, COUNT(*) as incident_count, AVG(average_speed_kmh) as avg_speed, (SELECT enrichment.zone_context.risk_level FROM TrafficEvent AS first).get(0) as risk_level FROM TrafficEvent(type='congestion', severity in ('high', 'critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 2 AND (SELECT enrichment.zone_context.risk_level FROM TrafficEvent AS first).get(0) in ('high', 'critical')",
+    "pattern_id": "traffic_congestion_hotspot",
+    "name": "HIGH: Traffic Congestion Hotspot",
+    "description": "Detects 2 or more high/critical traffic congestion events in ANY single zone within a 2-minute window. Groups by zone so multiple zones can alert simultaneously.",
+    "epl_rule": "SELECT zone, COUNT(*) as incident_count, AVG(average_speed_kmh) as avg_speed FROM TrafficEvent(type='congestion', severity in ('high','critical')).win:time(2 min) GROUP BY zone HAVING COUNT(*) >= 2",
     "severity": "high",
     "enabled": true,
-    "input_domains": ["traffic"],
+    "input_domains": [
+      "traffic"
+    ],
     "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.risk_level", "zone_context.population_density"],
+    "enrichment_fields": [],
     "version": 2,
     "created_by": "system",
-    "notes": "Requires enriched events with zone context from Enricher"
+    "notes": "Zone-agnostic. Pairs with 'traffic_congestion_surge' scenario."
   },
   {
-    "pattern_id": "accident_with_insufficient_response",
-    "name": "Critical Accident with Insufficient Emergency Response",
-    "description": "Detects critical traffic accidents in zones with limited hospital or police access. Uses enriched geographic context to assess response capability.",
-    "epl_rule": "SELECT t.zone, t.type, t.severity, t.injuries, t.enrichment.zone_context.hospitals as nearby_hospitals, t.enrichment.zone_context.avg_response_time_min as response_time_min FROM TrafficEvent(t) WHERE t.type='accident' AND t.severity='critical' AND (t.enrichment.zone_context.hospitals.size() = 0 OR t.enrichment.zone_context.avg_response_time_min > 15)",
+    "pattern_id": "cascading_urban_crisis",
+    "name": "CRITICAL: Cascading Urban Crisis",
+    "description": "Correlates a severe storm, a critical traffic accident, and a high/critical health emergency in the same zone within a 5-minute sliding window.",
+    "epl_rule": "SELECT c.zone as zone, c.wind_speed_kmh as wind_speed_kmh, t.injuries as injuries, h.call_type as call_type FROM ClimateEvent(type='storm', severity in ('high','critical')).win:time(5 min) as c, TrafficEvent(type='accident', severity in ('severe','critical')).win:time(5 min) as t, HealthEvent(type='emergency_call', severity in ('high','critical')).win:time(5 min) as h WHERE c.zone = t.zone AND t.zone = h.zone",
     "severity": "critical",
     "enabled": true,
-    "input_domains": ["traffic"],
+    "input_domains": [
+      "climate",
+      "traffic",
+      "health"
+    ],
     "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.hospitals", "zone_context.avg_response_time_min"],
+    "enrichment_fields": [],
     "version": 2,
     "created_by": "system",
-    "notes": "Criticality increases if zone has few hospitals or slow response times"
+    "notes": "Zone-agnostic. Pairs with 'cascading_multi_zone_crisis' scenario."
   },
   {
-    "pattern_id": "hazardous_weather_in_critical_zone",
-    "name": "Severe Weather in Critical Infrastructure Zone",
-    "description": "Detects severe weather events in critical zones (airport, industrial areas). Uses enriched zone risk level to escalate severity.",
-    "epl_rule": "SELECT * FROM PATTERN [c=ClimateEvent(type='storm', severity='high') -> t=TrafficEvent(type='accident')] WHERE c.zone = t.zone AND c.enrichment.zone_context.risk_level in ('high', 'critical')",
-    "severity": "critical",
+    "pattern_id": "moderate_air_quality_degradation",
+    "name": "MEDIUM: Sustained Moderate Air Quality Degradation",
+    "description": "Detects 3 or more medium-severity air-quality readings in any zone within a 3-minute window.",
+    "epl_rule": "SELECT zone, COUNT(*) as readings, AVG(aqi) as avg_aqi FROM EnvironmentEvent(type='air_quality', severity='medium').win:time(3 min) GROUP BY zone HAVING COUNT(*) >= 3",
+    "severity": "medium",
     "enabled": true,
-    "input_domains": ["climate", "traffic"],
+    "input_domains": [
+      "environment"
+    ],
     "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.risk_level"],
+    "enrichment_fields": [],
     "version": 2,
     "created_by": "system",
-    "notes": "Storm + accident = higher severity if in critical zone (airport) vs low-risk zone"
+    "notes": "Zone-agnostic. Pairs with 'air_quality_drift' scenario."
   },
   {
-    "pattern_id": "air_quality_health_emergency_correlation",
-    "name": "Poor Air Quality Triggers Health Emergencies in High-Density Zone",
-    "description": "Correlates poor air quality with respiratory/cardiac emergency calls in high-population-density zones. Uses enriched population density to assess impact scope.",
-    "epl_rule": "SELECT a.zone, a.aqi, h.call_type, COUNT(h) as emergency_calls, a.enrichment.zone_context.population_density as pop_density FROM PATTERN [a=EnvironmentEvent(type='air_quality', severity in ('high', 'critical')) -> h=HealthEvent(type='emergency_call', call_type in ('respiratory', 'cardiac'))].win:time(30 min) WHERE a.zone = h.zone AND a.enrichment.zone_context.population_density = 'very_high' GROUP BY a.zone, a.aqi, h.call_type",
-    "severity": "high",
+    "pattern_id": "public_gathering_activity",
+    "name": "LOW: Elevated Public Gathering Activity",
+    "description": "Detects 3 or more public gathering events in the same zone within a 5-minute window.",
+    "epl_rule": "SELECT zone, COUNT(*) as gatherings FROM PopulationEvent(type='gathering').win:time(5 min) GROUP BY zone HAVING COUNT(*) >= 3",
+    "severity": "low",
     "enabled": true,
-    "input_domains": ["environment", "health"],
+    "input_domains": [
+      "population"
+    ],
     "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.population_density"],
+    "enrichment_fields": [],
     "version": 2,
     "created_by": "system",
-    "notes": "Higher alert level in high-density areas (downtown) vs residential"
-  },
-  {
-    "pattern_id": "crowd_alert_in_low_response_zone",
-    "name": "Large Crowd Gathering in Zone with Limited Emergency Response",
-    "description": "Detects large crowds in zones with limited emergency service response capability. Uses enriched data to assess risk based on available infrastructure.",
-    "epl_rule": "SELECT zone, location, SUM(estimated_population) as total_population, (SELECT enrichment.zone_context.police_stations.size() FROM PopulationEvent AS first).get(0) as police_count, (SELECT enrichment.zone_context.avg_response_time_min FROM PopulationEvent AS first).get(0) as response_time FROM PopulationEvent(type in ('gathering', 'crowd_alert'), severity in ('high', 'critical')).win:time(5 min) GROUP BY zone, location HAVING SUM(estimated_population) > 5000 AND (SELECT enrichment.zone_context.police_stations.size() FROM PopulationEvent AS first).get(0) < 2",
-    "severity": "high",
-    "enabled": true,
-    "input_domains": ["population"],
-    "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.police_stations"],
-    "version": 2,
-    "created_by": "system",
-    "notes": "Criticality based on police availability and crowd size"
-  },
-  {
-    "pattern_id": "emergency_services_overwhelmed",
-    "name": "Emergency Services Potentially Overwhelmed by Multiple Concurrent Calls",
-    "description": "Detects surge in emergency calls. Uses enriched zone response time baseline to assess if services are overwhelmed.",
-    "epl_rule": "SELECT zone, COUNT(*) as emergency_count, (SELECT enrichment.zone_context.avg_response_time_min FROM HealthEvent AS first).get(0) as baseline_response_time FROM HealthEvent(type='emergency_call', severity in ('high', 'critical')).win:time(10 min) GROUP BY zone HAVING COUNT(*) >= 5",
-    "severity": "critical",
-    "enabled": true,
-    "input_domains": ["health"],
-    "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.avg_response_time_min"],
-    "version": 2,
-    "created_by": "system",
-    "notes": "Compares current call volume against zone baseline response time"
-  },
-  {
-    "pattern_id": "critical_pollution_spike",
-    "name": "Critical Pollution Spike in Industrial Zone",
-    "description": "Alerts on critical pollution in industrial zones with hazmat risk. Uses enriched zone type context.",
-    "epl_rule": "SELECT zone, type, severity, aqi FROM EnvironmentEvent(severity='critical' OR (type='air_quality' AND aqi > 400)).win:time(1 min) WHERE enrichment.zone_context.risk_level = 'high'",
-    "severity": "critical",
-    "enabled": true,
-    "input_domains": ["environment"],
-    "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.risk_level", "zone_context.notes"],
-    "version": 2,
-    "created_by": "system",
-    "notes": "Industrial zones get higher alert priority"
-  },
-  {
-    "pattern_id": "multi_domain_crisis_critical_zone",
-    "name": "Multi-Domain Crisis in Critical Infrastructure Zone",
-    "description": "Complex pattern: simultaneous critical events (traffic + weather + population) in zones with critical infrastructure (airport). Maximum severity alert.",
-    "epl_rule": "SELECT t.zone, COUNT(*) as event_count, t.enrichment.zone_context.risk_level as zone_risk FROM PATTERN [t=TrafficEvent(severity='critical') and c=ClimateEvent(severity='critical') and p=PopulationEvent(severity='critical')] WHERE t.zone = c.zone AND c.zone = p.zone AND t.enrichment.zone_context.risk_level = 'critical'",
-    "severity": "critical",
-    "enabled": true,
-    "input_domains": ["traffic", "climate", "population"],
-    "uses_enrichment": true,
-    "enrichment_fields": ["zone_context.risk_level"],
-    "version": 2,
-    "created_by": "system",
-    "notes": "Maximum severity: multiple domains + critical zone (e.g., airport)"
+    "notes": "Zone-agnostic. Pairs with 'public_gatherings' scenario."
   }
 ]

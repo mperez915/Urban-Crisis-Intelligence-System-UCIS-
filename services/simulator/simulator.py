@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CONFIG_POLL_INTERVAL = 3   # seconds between MongoDB config re-reads
+CONFIG_POLL_INTERVAL = 1   # seconds between MongoDB config re-reads (fast pause response)
 ALL_DOMAINS = ["traffic", "climate", "health", "environment", "population"]
 
 # Fallback weights used when no scenario is loaded
@@ -62,8 +62,11 @@ class SimulatorConfig:
     def domain_weights(self) -> Dict[str, int]:
         if self.active_scenario and "domain_weights" in self.active_scenario:
             w = self.active_scenario["domain_weights"]
-            # ensure all domains present with at least weight 1
-            return {d: max(1, int(w.get(d, 1))) for d in ALL_DOMAINS}
+            # Respect zero weights (a scenario may want to exclude domains entirely).
+            # Only fall back to default if the whole mapping sums to zero.
+            weights = {d: max(0, int(w.get(d, 0))) for d in ALL_DOMAINS}
+            if sum(weights.values()) > 0:
+                return weights
         return DEFAULT_WEIGHTS.copy()
 
     @property
@@ -180,21 +183,64 @@ class EventSimulator:
 
     # ── Publish / persist ──────────────────────────────────────────────────────
 
-    def publish_event(self, event: Dict[str, Any], domain: str) -> bool:
+    def _ensure_channel(self) -> bool:
+        """Reopen the RabbitMQ channel/connection if they went down."""
         try:
-            routing_key = f"events.{domain}.{event.get('type', 'generic')}"
-            self.channel.basic_publish(
-                exchange="ucis.events",
-                routing_key=routing_key,
-                body=json.dumps(event),
-                properties=pika.BasicProperties(
-                    content_type="application/json", delivery_mode=2,
-                ),
-            )
+            if self.connection is None or self.connection.is_closed:
+                logger.warning("RabbitMQ connection closed — reconnecting…")
+                self.connect_rabbitmq()
+                return True
+            if self.channel is None or self.channel.is_closed:
+                logger.warning("RabbitMQ channel closed — reopening…")
+                self.channel = self.connection.channel()
+                self.channel.exchange_declare(exchange="ucis.events", exchange_type="topic", durable=True)
+                return True
             return True
-        except Exception as e:
-            logger.error("Publish failed: %s", e)
+        except Exception as exc:
+            logger.error("Reconnect failed: %s", exc)
             return False
+
+    def publish_event(self, event: Dict[str, Any], domain: str) -> bool:
+        routing_key = f"events.{domain}.{event.get('type', 'generic')}"
+        body = json.dumps(event)
+        props = pika.BasicProperties(content_type="application/json", delivery_mode=2)
+
+        for attempt in (1, 2):
+            try:
+                if self.channel is None or self.channel.is_closed \
+                        or self.connection is None or self.connection.is_closed:
+                    if not self._ensure_channel():
+                        time.sleep(1)
+                        continue
+                self.channel.basic_publish(
+                    exchange="ucis.events", routing_key=routing_key, body=body, properties=props,
+                )
+                logger.info(
+                    "→ PUBLISHED [%s/%s] id=%s zone=%s severity=%s",
+                    domain,
+                    event.get("type", "?"),
+                    event.get("id", "?")[:8],
+                    event.get("zone", "?"),
+                    event.get("severity", "?"),
+                )
+                return True
+            except (pika.exceptions.ChannelClosed,
+                    pika.exceptions.ChannelWrongStateError,
+                    pika.exceptions.ConnectionClosed,
+                    pika.exceptions.StreamLostError) as e:
+                logger.warning("Publish attempt %d failed (%s); reconnecting…", attempt, e)
+                try:
+                    if self.connection and not self.connection.is_closed:
+                        self.connection.close()
+                except Exception:
+                    pass
+                self.connection = None
+                self.channel = None
+                self._ensure_channel()
+            except Exception as e:
+                logger.error("Publish failed: %s", e)
+                return False
+        return False
 
     def save_event(self, event: Dict[str, Any]) -> bool:
         try:
@@ -216,12 +262,19 @@ class EventSimulator:
             event_count = 0
             last_report = time.time()
 
+            was_paused = False
             while True:
                 self._poll_config()
 
                 if self.config.paused:
-                    time.sleep(0.5)
+                    if not was_paused:
+                        logger.info("⏸️  SIMULATOR PAUSED - stopping event generation")
+                        was_paused = True
+                    time.sleep(0.2)
                     continue
+                elif was_paused:
+                    logger.info("▶️  SIMULATOR RESUMED - resuming event generation")
+                    was_paused = False
 
                 domain    = self._pick_domain()
                 generator = self.generators[domain]

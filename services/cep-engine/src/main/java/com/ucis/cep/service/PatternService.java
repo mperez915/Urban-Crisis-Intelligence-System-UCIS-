@@ -16,6 +16,8 @@ import com.ucis.cep.messaging.RabbitMQService;
 import lombok.extern.slf4j.Slf4j;
 import org.bson.Document;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -35,6 +37,13 @@ public class PatternService {
     // patternId -> last known updated_at (ISO string) — used for change detection
     private final Map<String, String> patternVersions = new ConcurrentHashMap<>();
 
+    // Dedup: (patternId|zone) -> last-emit epoch millis. Suppresses duplicate complex events
+    // produced by Esper joins/sliding windows that emit one row per Cartesian combination.
+    private final Map<String, Long> lastEmitMillis = new ConcurrentHashMap<>();
+
+    @Value("${cep.dedup.cooldown.seconds:60}")
+    private long dedupCooldownSeconds;
+
     @Autowired
     public PatternService(EPRuntime epRuntime, MongoClient mongoClient, RabbitMQService rabbitMQService) {
         this.epRuntime = epRuntime;
@@ -47,14 +56,15 @@ public class PatternService {
 
     public void start() {
         syncPatternsFromMongo();
-        log.info("Patterns loaded. Will check for changes before every event.");
+        log.info("Patterns loaded. Background scheduler will poll for changes every 5s.");
     }
 
     /**
-     * Called by EventProcessorService before sending each event to Esper.
+     * Scheduled poll for pattern changes — runs every 5 seconds independently of event flow.
      * Queries only the latest updated_at in the patterns collection — O(1) with index.
      * Full sync runs only when that value has changed.
      */
+    @Scheduled(fixedRateString = "${cep.pattern.poll.ms:5000}", initialDelay = 5000)
     public void syncIfNeeded() {
         try {
             MongoDatabase db = mongoClient.getDatabase("ucis_db");
@@ -154,6 +164,8 @@ public class PatternService {
 
     private void undeployPattern(String patternId) {
         String deploymentId = deployedPatterns.remove(patternId);
+        // Drop dedup state so a re-deployed pattern is not blocked by a stale cooldown
+        lastEmitMillis.keySet().removeIf(k -> k.startsWith(patternId + "|"));
         if (deploymentId == null) return;
         try {
             epRuntime.getDeploymentService().undeploy(deploymentId);
@@ -165,13 +177,28 @@ public class PatternService {
     private void handlePatternMatch(String patternId, Document patternDoc, Object underlying) {
         try {
             Map<String, Object> resultMap = toMap(underlying);
+            String zone = String.valueOf(resultMap.getOrDefault("zone", "unknown"));
+
+            // Suppress duplicate emissions for the same (pattern, zone) within the cooldown window.
+            // Esper joins/sliding-window aggregates re-emit on every new arriving event in the
+            // window; without this the same logical complex event is published many times.
+            String dedupKey = patternId + "|" + zone;
+            long nowMs = System.currentTimeMillis();
+            long cooldownMs = dedupCooldownSeconds * 1000L;
+            Long previous = lastEmitMillis.get(dedupKey);
+            if (previous != null && (nowMs - previous) < cooldownMs) {
+                log.debug("Suppressing duplicate match for '{}' zone={} ({}ms since last emit, cooldown={}ms)",
+                          patternId, zone, nowMs - previous, cooldownMs);
+                return;
+            }
+            lastEmitMillis.put(dedupKey, nowMs);
 
             Map<String, Object> complexEvent = new LinkedHashMap<>();
             complexEvent.put("pattern_id",    patternId);
             complexEvent.put("pattern_name",  patternDoc.getString("name"));
             complexEvent.put("alert_level",   patternDoc.getString("severity"));
             complexEvent.put("timestamp",     Instant.now().toString());
-            complexEvent.put("zone",          resultMap.getOrDefault("zone", "unknown").toString());
+            complexEvent.put("zone",          zone);
             complexEvent.put("result_data",   resultMap);
             complexEvent.put("source_events", Collections.emptyList());
             complexEvent.put("description",   patternDoc.getString("description"));
