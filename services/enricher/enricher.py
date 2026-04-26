@@ -275,7 +275,10 @@ class EventEnricher:
             if now - self._last_pause_check >= self._pause_check_interval:
                 self._last_pause_check = now
                 try:
-                    cfg = self.mongo.ucis_db.simulator_config.find_one({"_id": "main"}) or {}
+                    cfg = (
+                        self.mongo.ucis_db.simulator_config.find_one({"_id": "main"})
+                        or {}
+                    )
                     new_paused = bool(cfg.get("paused", False))
                     if new_paused != self._paused:
                         self._paused = new_paused
