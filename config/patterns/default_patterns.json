@@ -18,8 +18,8 @@
   {
     "pattern_id": "cascading_urban_crisis",
     "name": "CRITICAL: Cascading Urban Crisis",
-    "description": "Correlates a severe storm, a critical traffic accident, and a high/critical health emergency in the same zone within a 5-minute sliding window.",
-    "epl_rule": "SELECT c.zone as zone, c.wind_speed_kmh as wind_speed_kmh, t.injuries as injuries, h.call_type as call_type FROM ClimateEvent(type='storm', severity in ('high','critical')).win:time(5 min) as c, TrafficEvent(type='accident', severity in ('severe','critical')).win:time(5 min) as t, HealthEvent(type='emergency_call', severity in ('high','critical')).win:time(5 min) as h WHERE c.zone = t.zone AND t.zone = h.zone",
+    "description": "Correlates a high/critical storm, a high/critical traffic accident, and a high/critical health emergency in the same zone within a 5-minute sliding window.",
+    "epl_rule": "SELECT c.zone as zone, c.wind_speed_kmh as wind_speed_kmh, t.injuries as injuries, h.call_type as call_type FROM ClimateEvent(type='storm', severity in ('high','critical')).win:time(5 min) as c, TrafficEvent(type='accident', severity in ('high','critical')).win:time(5 min) as t, HealthEvent(type='emergency_call', severity in ('high','critical')).win:time(5 min) as h WHERE c.zone = t.zone AND t.zone = h.zone",
     "severity": "critical",
     "enabled": true,
     "input_domains": [
@@ -29,7 +29,7 @@
     ],
     "uses_enrichment": true,
     "enrichment_fields": [],
-    "version": 2,
+    "version": 3,
     "created_by": "system",
     "notes": "Zone-agnostic. Pairs with 'cascading_multi_zone_crisis' scenario."
   },

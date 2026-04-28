@@ -54,9 +54,7 @@ class TrafficEventGenerator(BaseEventGenerator):
                     "zone": zone,
                     "vehicles_involved": random.randint(2, 5),
                     "injuries": random.randint(0, 10),
-                    "severity": random.choice(
-                        ["minor", "moderate", "severe", "critical"]
-                    ),
+                    "severity": random.choice(["low", "medium", "high", "critical"]),
                     "lanes_blocked": random.randint(1, 4),
                 }
             )

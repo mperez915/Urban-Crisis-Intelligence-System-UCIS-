@@ -100,7 +100,7 @@ HAVING COUNT(*) >= 2
 
 ### 2. `cascading_urban_crisis` — CRITICAL
 
-**Qué detecta.** Una **correlación multi-dominio en la misma zona** dentro de una ventana de 5 minutos: simultáneamente hay una tormenta severa, un accidente de tráfico crítico y una emergencia sanitaria de alta gravedad.
+**Qué detecta.** Una **correlación multi-dominio en la misma zona** dentro de una ventana de 5 minutos: simultáneamente hay una tormenta de severidad alta o crítica, un accidente de tráfico de severidad alta o crítica y una emergencia sanitaria de severidad alta o crítica.
 
 **Regla EPL:**
 ```sql
@@ -109,7 +109,7 @@ SELECT c.zone           AS zone,
        t.injuries       AS injuries,
        h.call_type      AS call_type
 FROM   ClimateEvent(type='storm',         severity in ('high','critical')).win:time(5 min) AS c,
-       TrafficEvent(type='accident',      severity in ('severe','critical')).win:time(5 min) AS t,
+       TrafficEvent(type='accident',      severity in ('high','critical')).win:time(5 min) AS t,
        HealthEvent (type='emergency_call', severity in ('high','critical')).win:time(5 min) AS h
 WHERE  c.zone = t.zone
   AND  t.zone = h.zone
